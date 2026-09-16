@@ -1,7 +1,12 @@
 import pytest
 
 from stagecraft.agents.fake_model import FakeModel, ScriptExhaustedError, reply, tool_call
-from stagecraft.agents.single import DEFAULT_INSTRUCTIONS, build_single_agent, run_single_agent
+from stagecraft.agents.single import (
+    DEFAULT_INSTRUCTIONS,
+    build_single_agent,
+    format_trace,
+    run_single_agent,
+)
 from stagecraft.tools.fake import FakeWorkspace, build_fake_registry
 
 
@@ -91,3 +96,15 @@ def test_agent_only_holds_the_tools_it_named() -> None:
     registry, _ = build_fake_registry()
     agent = build_single_agent(registry, ["render_output"], model=FakeModel([]))
     assert [t.name for t in agent.tools] == ["render_output"]
+
+
+async def test_trace_lists_each_call_and_result_in_order() -> None:
+    registry, _ = build_fake_registry()
+    model = FakeModel([tool_call("fetch_brief", source="a"), reply("ok")])
+    agent = build_single_agent(registry, ["fetch_brief"], model=model)
+
+    result = await run_single_agent(agent, "Fetch.")
+    call, output = format_trace(result)
+
+    assert call == '-> fetch_brief({"source": "a"})'
+    assert output.startswith('<- {"status":"ok","brief_id":"brief_0001"')

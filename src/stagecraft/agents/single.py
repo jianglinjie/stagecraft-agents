@@ -67,6 +67,19 @@ async def run_single_agent(
     )
 
 
+def format_trace(result: RunResult) -> list[str]:
+    """One line per tool call and per tool result, for eyeballing a run."""
+    lines: list[str] = []
+    for item in result.new_items:
+        if item.type == "tool_call_item":
+            raw = item.raw_item
+            name = getattr(raw, "name", None) or getattr(raw, "type", "tool")
+            lines.append(f"-> {name}({getattr(raw, 'arguments', '')})")
+        elif item.type == "tool_call_output_item":
+            lines.append(f"<- {item.output}")
+    return lines
+
+
 async def _main(argv: Sequence[str]) -> int:
     from stagecraft.tools.fake import build_fake_registry
 
@@ -78,8 +91,10 @@ async def _main(argv: Sequence[str]) -> int:
         print(f"error: {err}", file=sys.stderr)
         return 2
     result = await run_single_agent(agent, prompt)
-    print(result.final_output)
+    for line in format_trace(result):
+        print(line, file=sys.stderr)
     print(f"workspace: {workspace.ids()}", file=sys.stderr)
+    print(result.final_output)
     return 0
 
 
