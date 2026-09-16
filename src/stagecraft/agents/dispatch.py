@@ -43,9 +43,11 @@ class RouteDecision(ToolResult):
 
 class PlannerDispatched(ToolResult):
     plan_id: str
+    task_id: str
     revision: int
     authored_stage_ids: list[str]
     questions: list[str]
+    interrupt: bool
     summary: str
     plan_summary: str
     next_action: str
@@ -114,29 +116,46 @@ def build_dispatch_tools(runtime: AgentRuntime) -> list[ToolSpec]:
         goal: Annotated[str, "What the plan must achieve."],
         stage_id: Annotated[str | None, "Rewrite only this stage."] = None,
         answers: Annotated[list[str], "The user's answers to the Planner's questions."] = [],  # noqa: B006
+        task_id: Annotated[
+            str | None, "Resume this Planner task. Omit to use the plan's own planner task."
+        ] = None,
     ) -> PlannerDispatched:
-        """Ask the Planner to author stages into the Plan Store. It does not execute them."""
+        """Ask the Planner to author stages into the Plan Store. It does not execute them.
+
+        The Planner keeps its own conversation per task, so a second dispatch with the same
+        task continues where the last one stopped, including across restarts.
+        """
         _require_orchestrator(ctx, "dispatch_planner")
         before = {stage.id for stage in store.get_plan(plan_id).stages}
+        if answers:
+            store.clear_questions(plan_id=plan_id, role=ctx.role)
+        task = task_id or f"{plan_id}:planner"
         payload = PlannerPayload(plan_id=plan_id, goal=goal, stage_id=stage_id, answers=answers)
         result = await runtime.run_sub_agent(
-            build_planner(runtime), payload, ctx.as_role("planner")
+            build_planner(runtime),
+            payload,
+            ctx.as_role("planner"),
+            session=runtime.session(f"task:{task}"),
         )
         output = read_submission(result, PlannerOutput, role="planner")
 
+        if output.questions:
+            store.ask_user(plan_id=plan_id, role=ctx.role, questions=output.questions)
         plan = store.get_plan(plan_id)
         authored = [stage.id for stage in plan.ordered() if stage.id not in before]
         if output.questions:
-            action = "ask the user these questions and end the turn"
+            action = "the turn ends here: the user must answer these questions first"
         elif plan.next_pending() is not None:
             action = "request waiting_user with review_kind=plan_review and present the stage"
         else:
             action = "no pending stage; tell the user what the plan contains"
         return PlannerDispatched(
             plan_id=plan.id,
+            task_id=task,
             revision=plan.revision,
             authored_stage_ids=authored,
             questions=output.questions,
+            interrupt=bool(output.questions),
             summary=output.summary,
             plan_summary=plan.summary(),
             next_action=action,

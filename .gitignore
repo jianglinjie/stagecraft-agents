@@ -17,3 +17,6 @@ wheels/
 .pytest_cache/
 *.db
 *.sqlite
+
+# local data
+.data/

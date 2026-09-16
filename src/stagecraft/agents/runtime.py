@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from agents import Agent, FunctionTool, Model, RunConfig, Runner, RunResult
+from agents import Agent, FunctionTool, Model, RunConfig, Runner, RunResult, SQLiteSession
+from agents.memory import Session
 from pydantic import BaseModel
 
 from stagecraft.agents.roles import ROLE_TOOLS
@@ -34,7 +36,20 @@ class AgentRuntime:
     max_turns: int = 20
     tracing: bool = False
     on_sub_run: SubRunHook | None = None
+    session_db: Path | None = None
     extras: dict[str, Any] = field(default_factory=dict)
+    _sessions: dict[str, Session] = field(default_factory=dict, repr=False)
+
+    def session(self, key: str) -> Session:
+        """Conversation memory for ``key``: the chat for the orchestrator, a task for the planner.
+
+        Backed by a file when ``session_db`` is set, so it survives a restart. In memory
+        otherwise; the instance is cached so a second run with the same key continues.
+        """
+        if key not in self._sessions:
+            db = self.session_db if self.session_db is not None else ":memory:"
+            self._sessions[key] = SQLiteSession(key, db)
+        return self._sessions[key]
 
     def model(self, role: Role) -> Model:
         try:
@@ -83,6 +98,7 @@ def build_runtime(
     store: PlanStore | None = None,
     workspace: FakeWorkspace | None = None,
     max_turns: int = 20,
+    session_db: Path | None = None,
 ) -> AgentRuntime:
     from stagecraft.agents.dispatch import build_dispatch_tools, build_submit_tools
 
@@ -96,6 +112,7 @@ def build_runtime(
         registry=registry,
         models=models,
         max_turns=max_turns,
+        session_db=session_db,
     )
     for spec in [*build_submit_tools(), *build_dispatch_tools(runtime)]:
         registry.register(spec)

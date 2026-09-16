@@ -10,7 +10,7 @@
 |---|--------|------|
 | 1 | 工具注册表 + 单 Agent | 完成 |
 | 2 | 四角色 + dispatch-and-return + Plan Store | 完成 |
-| 3 | 可恢复的 turn、人工介入、SSE、租约 | 计划中 |
+| 3 | 可恢复的 turn、人工介入、SSE、租约 | 完成 |
 | 4 | 记忆、压缩、资产池 | 计划中 |
 | 5 | MCP server/client + LangGraph 对照 | 计划中 |
 
@@ -25,6 +25,17 @@ uv run --env-file .env python -m stagecraft.agents.single --chat "Fetch https://
 uv run --env-file .env python -m stagecraft.agents.orchestrator "Write a two-part series about https://example.com/p/1, review the plan first."
 ```
 
+HTTP 服务（数据默认写到 `.data/`）：
+
+```bash
+uv run --env-file .env python -m stagecraft.api          # http://127.0.0.1:8000
+curl -s -X POST localhost:8000/sessions                    # 拿到 session id
+curl -N localhost:8000/sessions/<id>/events                # 另开一个终端看 SSE
+curl -s -X POST localhost:8000/sessions/<id>/messages \
+  -H 'content-type: application/json' \
+  -d '{"content": "Write one short article about https://example.com/p/1", "client_message_id": "m1"}'
+```
+
 stderr 打印每次工具调用和返回（`->` / `<-`），stdout 是最终回复。`--chat` 之后可以继续追问，历史由 `follow_up()` 带到下一轮。
 
 ## 目录
@@ -35,6 +46,7 @@ src/stagecraft/
              dispatch.py 三个 dispatch 工具；submit.py；single.py 单 Agent；fake_model.py
   plan/      model.py、state_machine.py、store.py（SQLite + 版本号 CAS + 角色守卫）、errors.py
   tools/     registry.py；results.py；context.py（注入的调用方角色）；fake/ 内容工具；plan/ 计划工具
+  api/       app.py 路由；turns.py 后台 turn；events.py 事件总线；leases.py 租约；sessions.py 消息与 turn
   config.py  模型端点配置（OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL）
 tests/
 ```
@@ -92,4 +104,36 @@ tests/
 **实测（DeepSeek）。** 第一轮：router 判为 workflow，建 plan，planner 写出三个 stage，orchestrator 把第一个置为 plan_review 后停下等确认。第二轮用户批准：带 `user_confirmed=true` 进入 doing；executor 第一次只完成了一个工作项，orchestrator 按 `next_action` 带 `retry_ids` 重试；全部完成后标记 done，并把下一个 stage 置为 plan_review 再次停下。模型自己带上了 `expected_revision`。这次实测也暴露出 planner 会规划工具做不到的工作项，所以现在 planner 的提示词末尾会从注册表生成一份 executor 能力清单。
 
 **测试覆盖。** 状态转移表 36 种组合逐一断言；确认、契约、产出三条规则；版本冲突与两线程并发只有一个成功；另一个连接插入写入时 SQL 层 CAS 生效；九种越权写入被拒；重开数据库文件后计划仍在。端到端：四个角色各用一个脚本化假模型跑完「路由、建计划、写两个 stage、评审、确认、执行、完成」两轮对话；子 Agent 只看到 payload；direct 路径不建计划；汇报以 store 为准；未确认时 executor 不会被调用；没有产出无法 done；子 Agent 拿不到也借不到 dispatch 工具；子 Agent 崩溃变成工具错误；非法提交可修正；用文字收尾算失败；planner 能看到能力清单。
+
+---
+
+## 里程碑 3：可恢复的 turn、人工介入、HTTP 与 SSE
+
+**解决什么问题。** 前两个里程碑只能在一个进程里跑一轮。真实产品还要回答五个问题：几分钟的 Agent 运行怎么不卡住请求；planner 问完问题，下一轮怎么接上；浏览器断线重连，怎么补上漏掉的进度；网络重发怎么不跑两遍；同一个会话怎么不被两个请求同时跑。
+
+**怎么设计。**
+
+- **持久化和运行分离。** 发消息的接口只做必须成功的事：幂等检查、拿租约、在一个事务里写入用户消息和一条 running 的 turn，然后立刻返回 202。Agent 在后台任务里跑，进度走 SSE。请求返回时消息已经落库，后台就算崩了，turn 行也会记下它是怎么结束的。
+- **planner 按 task_id 恢复。** dispatch_planner 给 planner 挂一个 SDK 的 `SQLiteSession`，key 是 task_id，默认和 plan 绑定。同一个任务第二次 dispatch，planner 看到的是上次的完整对话加上新 payload。session 存在文件里，重启后照样接得上。
+- **提问即中断，由代码保证。** planner 提交的 questions 非空时，dispatch 把问题写进 plan，并把第一个已写好的 pending stage 置为 `waiting_user(plan_review)`。orchestrator 的 `tool_use_behavior` 一看到工具结果带 `interrupt: true` 就结束本轮，模型不会再被调用，也就不可能接着派发 executor。用户回答后带上 answers 再 dispatch，问题清空，planner 在同一个 session 里改写 stage。
+- **事件总线 = 日志 + 广播。** 每个会话一个有上限的日志，加上一组在线订阅者队列。分配 seq、追加日志、推给订阅者在同一个临界区里完成，对应 Redis 版本里 Lua 脚本做的 INCR、XADD、PUBLISH。订阅顺序是先注册、再回放、再接实时：回放期间新发布的事件既进日志也进队列，按 seq 去重，所以既不丢也不重。
+- **断线重连。** SSE 每帧带 `id: seq`，浏览器重连时自动带上 `Last-Event-ID`，服务端只回放比它新的事件。如果客户端落后太多、日志已经裁掉了中间部分，就发一个 `resync` 事件让它去拉快照，而不是假装没有缺口。
+- **state 事件是完整快照。** turn 开始时、每次 plan 或 dispatch 工具返回后、turn 结束时，都推一份完整的 plan。前端面板只靠它重建，不解析 Agent 说的话。
+- **消息 id 幂等。** `client_message_id` 在会话内唯一。检查放在拿租约之前：重发一条已存储的消息，即使它的 turn 还在跑，也返回同一个 turn_id 并标记 duplicate，而不是 409。数据库唯一约束兜底并发重发。
+- **turn 租约。** SQLite 一条 upsert 实现 `SET NX PX`：没有记录就插入，已过期就覆盖，未过期时 `rowcount` 为 0，返回 409。后台定时续租，续租和释放都要求 token 匹配。进程死了续租就停，租约到期自动可用。续租被拒说明别人已经接管，本轮立即取消并发出 `turn_failed(lease_lost)`，不和新持有者并排写。
+
+**事件协议。** `turn_started`、`item_started`、`item_delta`、`item_completed`、`turn_completed`、`turn_failed`、`state`，重连时可能多一个 `resync`。工具调用和文本消息都是 item，用 `kind` 区分。
+
+**为什么持久化和运行分离。** 如果在请求里跑完 Agent 再返回，几分钟的运行会占住连接，网关超时后客户端不知道消息到底有没有收到，只能重发，于是跑两遍。先落库再返回，客户端拿到 202 就确定消息已存在；重发靠 `client_message_id` 识别；进度和结果从事件流和快照接口拿，和那次 HTTP 请求的生死无关。
+
+**取舍。**
+
+- 事件总线是进程内实现，接口按 Redis Streams + Pub/Sub 的形状设计。多实例部署时替换实现，订阅端逻辑不用改。
+- 幂等检查和拿租约不是一个原子操作。同一条消息的两个并发重发，一个拿到租约，另一个在 409 分支里再查一次消息，查到就当重复处理。极端时序下仍可能返回 409，客户端重试即可。
+- 中断没有用 SDK 的 `needs_approval` 和 RunState，因为问题要持久化在 plan 上，跨请求、跨重启都存在，而不是挂在某次运行的内存状态里。
+- 接 SSE 时发现 SDK 的流式运行会用 `dataclasses.asdict` 给模型对象算指纹，会深拷贝模型的所有字段，所以脚本化假模型改成了普通类。
+
+**实测（DeepSeek）。** 起服务后发一条消息立刻得到 202；用同一个 client_message_id 重发返回 duplicate；再发另一条返回 409。SSE 里依次看到 dispatch_router 判为 direct、四个内容工具各自的开始和完成事件、177 个文本 delta、turn_completed。结束后快照显示一轮 completed、一问一答两条消息。
+
+**测试覆盖。** 事件总线：seq 按会话递增；先回放尾部再接实时；Last-Event-ID 只补缺口；回放期间发布的事件恰好到达一次且有序；落后太多触发 resync；空闲心跳；跨线程发布保序。租约：同时只有一个持有者；续租要 token；持有者死亡后到期可接管，旧持有者醒来续租和释放都失败且不影响新持有者。恢复与中断：同一任务的第二次 dispatch 接着上次对话；重启后照样接上；提问后本轮只调用两次模型、executor 未被调用、stage 进入 plan_review；回答后问题清空、stage 被改写。HTTP（真实 uvicorn）：事件顺序和 seq 连续、state 快照、文本 delta 拼起来等于最终回复；Last-Event-ID 重连无缺口无重复；重发幂等；运行中再发 409、结束后可发；同一条消息在自己运行时重发不算冲突；失败的 turn 发 turn_failed 并释放会话；404 和 422。TurnService：租约被接管时本轮以 lease_lost 结束且不动新持有者；长 turn 期间续租让租约一直有效。
 

@@ -49,7 +49,9 @@ src/stagecraft/
               StructuredToolError), context.py (RunContext: the injected caller role),
               fake/ (FakeWorkspace + four content tools), plan/ (five plan tools)
   memory/     session memory, compaction, long-term memory interface
-  api/        FastAPI app, SSE, event bus, leases
+  api/        app.py (routes, build_services), turns.py (TurnService: lease -> background run ->
+              events), events.py (EventBus: bounded log + broadcast + seq), leases.py (SQLite TTL
+              lease), sessions.py (sessions, messages, turns; client_message_id idempotency)
   mcp/        MCP server (FastMCP) and client
 tests/        all tests; pytest runs nothing outside this directory
 docs/         design notes and comparisons
@@ -70,6 +72,13 @@ docs/         design notes and comparisons
   turns it into a `ToolError`. Only unexpected exceptions become `tool_failed`.
 - Sub-agents return results by calling their `submit_*` tool (see `agents/submit.py`). Do not
   switch them to `output_type`: it breaks endpoints without json_schema response formats.
+- Everything a client sees goes through `EventBus.publish`. The panel is rebuilt from `state`
+  events (full plan snapshots), never from assistant text.
+- A turn that must stop for the user ends in code (`interrupt: true` in a tool result plus the
+  orchestrator's `stop_on_interrupt`), not by asking the model to stop.
+- HTTP tests run a real uvicorn server (`tests/conftest.py`): httpx's ASGI transport buffers
+  whole responses and never returns for an event stream.
+- `FakeModel` must stay a plain class: the SDK fingerprints dataclass models with `asdict`.
 - Durable state lives in the Plan Store and the session tables, not in the transcript.
 - One milestone = one commit, plus a README section explaining the problem, the design and
   the trade-offs in a form that can be spoken in two minutes.

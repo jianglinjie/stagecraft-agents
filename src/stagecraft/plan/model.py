@@ -109,6 +109,10 @@ class Plan(BaseModel):
     objective: str
     revision: int = 0
     stages: list[Stage] = Field(default_factory=list)
+    open_questions: list[str] = Field(
+        default_factory=list,
+        description="Questions the Planner is blocked on. Cleared when answers arrive.",
+    )
 
     def stage(self, stage_id: str) -> Stage | None:
         return next((s for s in self.stages if s.id == stage_id), None)
@@ -121,7 +125,10 @@ class Plan(BaseModel):
 
     def summary(self) -> str:
         """The one-line-per-stage digest that goes into a Turn Context."""
-        if not self.stages:
+        if not self.stages and not self.open_questions:
             return f"plan {self.id} (rev {self.revision}): no stages yet"
         rows = [f"  {s.order}. [{s.state}] {s.id} — {s.goal}" for s in self.ordered()]
-        return f"plan {self.id} (rev {self.revision}) — {self.objective}\n" + "\n".join(rows)
+        text = f"plan {self.id} (rev {self.revision}) — {self.objective}\n" + "\n".join(rows)
+        if self.open_questions:
+            text += "\n  open questions: " + " | ".join(self.open_questions)
+        return text

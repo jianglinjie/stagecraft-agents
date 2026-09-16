@@ -48,6 +48,7 @@ WRITE_PERMISSIONS: dict[str, frozenset[Role]] = {
     "write_contract": frozenset({"planner"}),
     "attach_runtime": frozenset({"executor"}),
     "update_state": frozenset({"orchestrator"}),
+    "ask_user": frozenset({"orchestrator"}),
 }
 
 _SCHEMA = """
@@ -146,6 +147,7 @@ class PlanStore:
                 )
             stage.contract = contract
             stage.goal = contract.goal
+            stage.questions = []
             if order is not None:
                 stage.order = order
             return stage
@@ -206,6 +208,45 @@ class PlanStore:
             return stage
 
         return self._mutate(plan_id, expected_revision, mutate)
+
+    def ask_user(
+        self, *, plan_id: str, role: Role, questions: list[str]
+    ) -> tuple[Plan, Stage | None]:
+        """Record that planning is blocked on the user.
+
+        The questions go on the plan, and on the first authored pending stage when there
+        is one, which also moves into plan review: the stage cannot be started while its
+        author is still waiting for answers.
+        """
+        _require_role(role, "ask_user")
+        moved: list[Stage] = []
+
+        def mutate(plan: Plan) -> Stage:
+            plan.open_questions = list(questions)
+            stage = next(
+                (s for s in plan.ordered() if s.state == StageState.PENDING and s.contract),
+                None,
+            )
+            if stage is not None:
+                check_transition(stage, StageState.WAITING_USER, review_kind=ReviewKind.PLAN_REVIEW)
+                stage.state = StageState.WAITING_USER
+                stage.review_kind = ReviewKind.PLAN_REVIEW
+                stage.questions = list(questions)
+                moved.append(stage)
+            return stage  # type: ignore[return-value]
+
+        plan, _ = self._mutate(plan_id, None, mutate)
+        return plan, (moved[0] if moved else None)
+
+    def clear_questions(self, *, plan_id: str, role: Role) -> Plan:
+        _require_role(role, "ask_user")
+
+        def mutate(plan: Plan) -> Stage:
+            plan.open_questions = []
+            return None  # type: ignore[return-value]
+
+        plan, _ = self._mutate(plan_id, None, mutate)
+        return plan
 
     # -- internals -------------------------------------------------------------
 

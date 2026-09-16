@@ -8,15 +8,25 @@ store would refuse it, because those halves belong to other roles.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from collections.abc import Sequence
+from typing import Any
 
-from agents import Agent, Runner, RunResult
+from agents import (
+    Agent,
+    FunctionToolResult,
+    RunContextWrapper,
+    Runner,
+    RunResult,
+    RunResultStreaming,
+    ToolsToFinalOutputResult,
+)
 from agents.items import TResponseInputItem
 from pydantic import BaseModel
 
 from stagecraft.agents.runtime import AgentRuntime, build_runtime, same_model_for_all_roles
-from stagecraft.agents.single import build_openai_model, follow_up, format_trace
+from stagecraft.agents.single import build_openai_model, format_trace
 from stagecraft.config import MissingConfigError
 from stagecraft.tools.context import Role
 
@@ -30,7 +40,8 @@ Direct route: use the content tools yourself, then reply naming the final id.
 
 Workflow route:
 1. plan_create with the objective.
-2. dispatch_planner with plan_id and goal. If it returns questions, ask the user and end the turn.
+2. dispatch_planner with plan_id and goal. If the Planner has questions, the turn ends by itself;
+   when the user answers, dispatch_planner again with the same plan_id and their answers.
 3. For the next pending stage request waiting_user with review_kind=plan_review. Present the
    stages (order, goal, work items) and end the turn. Never approve on the user's behalf.
 4. After the user explicitly approves: request doing with user_confirmed=true, then
@@ -46,27 +57,83 @@ Rules:
 - On an error result, read its code and hint before doing anything else."""
 
 
+def stop_on_interrupt(
+    _ctx: RunContextWrapper[Any], results: list[FunctionToolResult]
+) -> ToolsToFinalOutputResult:
+    """End the turn in code the moment a tool reports that the user must answer first.
+
+    Asking the model to "stop and wait" is a request; this is a guarantee. The model is
+    not called again this turn, so it cannot keep dispatching past the question.
+    """
+    for result in results:
+        data = _json_object(result.output)
+        if data and data.get("interrupt"):
+            questions = [str(q) for q in data.get("questions", [])]
+            lines = "\n".join(f"{i}. {q}" for i, q in enumerate(questions, start=1))
+            return ToolsToFinalOutputResult(
+                is_final_output=True,
+                final_output=f"Before planning can continue, please answer:\n{lines}",
+            )
+    return ToolsToFinalOutputResult(is_final_output=False, final_output=None)
+
+
 def build_orchestrator(runtime: AgentRuntime) -> Agent:
     return Agent(
         name="orchestrator",
         instructions=ORCHESTRATOR_INSTRUCTIONS,
         model=runtime.model("orchestrator"),
         tools=runtime.tools("orchestrator"),
+        tool_use_behavior=stop_on_interrupt,
     )
+
+
+def chat_session_key(chat_id: str) -> str:
+    return f"chat:{chat_id}"
 
 
 async def run_orchestrator_turn(
     runtime: AgentRuntime,
     user_input: str | list[TResponseInputItem],
+    *,
+    remember: bool = False,
     **context_kwargs: str,
 ) -> RunResult:
+    """One user turn. With ``remember`` the chat's session supplies and keeps the history."""
+    session = runtime.session(chat_session_key(runtime.chat_id)) if remember else None
     return await Runner.run(
         build_orchestrator(runtime),
         user_input,
         context=runtime.context("orchestrator", **context_kwargs),
         max_turns=runtime.max_turns,
         run_config=runtime.run_config(),
+        session=session,
     )
+
+
+def stream_orchestrator_turn(
+    runtime: AgentRuntime, user_input: str, **context_kwargs: str
+) -> RunResultStreaming:
+    """The streamed form the HTTP layer uses. History always comes from the chat session."""
+    return Runner.run_streamed(
+        build_orchestrator(runtime),
+        user_input,
+        context=runtime.context("orchestrator", **context_kwargs),
+        max_turns=runtime.max_turns,
+        run_config=runtime.run_config(),
+        session=runtime.session(chat_session_key(runtime.chat_id)),
+    )
+
+
+def _json_object(output: Any) -> dict[str, Any] | None:
+    if isinstance(output, BaseModel):
+        return output.model_dump()
+    if isinstance(output, str):
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError:
+            return None
+        return data if isinstance(data, dict) else None
+    return None
 
 
 def _print_sub_run(role: Role, payload: BaseModel, result: RunResult) -> None:
@@ -85,9 +152,9 @@ async def _main(argv: Sequence[str]) -> int:
     runtime = build_runtime(chat_id="cli", models=same_model_for_all_roles(model))
     runtime.on_sub_run = _print_sub_run
 
-    user_input: str | list[TResponseInputItem] = prompt
+    user_input = prompt
     while True:
-        result = await run_orchestrator_turn(runtime, user_input)
+        result = await run_orchestrator_turn(runtime, user_input, remember=True)
         for line in format_trace(result):
             print(line, file=sys.stderr)
         plan = runtime.store.latest_for_chat("cli")
@@ -101,7 +168,7 @@ async def _main(argv: Sequence[str]) -> int:
             return 0
         if not text or text.lower() in {"exit", "quit"}:
             return 0
-        user_input = follow_up(result, text)
+        user_input = text
 
 
 if __name__ == "__main__":

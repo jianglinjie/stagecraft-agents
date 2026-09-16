@@ -401,6 +401,5 @@ async def test_planner_is_told_what_the_executor_can_actually_do() -> None:
     instructions = models["planner"].calls[0].system_instructions or ""
     for name in ("fetch_brief", "write_outline", "write_draft", "render_output"):
         assert f"- {name}: " in instructions
-    report = last_tool_output(models["orchestrator"].calls[2])
-    assert report["questions"] == ["tone?"]
-    assert "ask the user" in report["next_action"]
+    assert models["orchestrator"].exhausted is False
+    assert len(models["orchestrator"].calls) == 2

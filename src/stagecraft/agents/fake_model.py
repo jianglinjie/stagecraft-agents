@@ -10,9 +10,13 @@ what the agent did and what the model saw.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
+import threading
+import time
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from agents.agent_output import AgentOutputSchemaBase
@@ -23,9 +27,12 @@ from agents.models.interface import Model, ModelTracing
 from agents.tool import Tool
 from agents.usage import Usage
 from openai.types.responses import (
+    Response,
+    ResponseCompletedEvent,
     ResponseFunctionToolCall,
     ResponseOutputMessage,
     ResponseOutputText,
+    ResponseTextDeltaEvent,
 )
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import BaseModel
@@ -46,8 +53,24 @@ class Reply:
     text: str
 
 
-Step = ToolCall | Reply
+@dataclass(frozen=True)
+class WaitFor:
+    """Block this model turn until ``event`` is set: lets a test hold a turn mid-flight.
+
+    A ``threading.Event`` rather than an asyncio one, because the turn may be running on
+    a server's event loop in another thread.
+    """
+
+    event: threading.Event
+    timeout: float = 10.0
+
+
+Step = ToolCall | Reply | WaitFor
 Turn = Sequence[Step]
+
+
+def wait_for(event: threading.Event, timeout: float = 10.0) -> WaitFor:
+    return WaitFor(event=event, timeout=timeout)
 
 
 def tool_call(name: str, /, **arguments: Any) -> ToolCall:
@@ -94,20 +117,23 @@ class ScriptExhaustedError(RuntimeError):
     """The runner asked for another model turn but the script has none left."""
 
 
-@dataclass
 class FakeModel(Model):
     """Replay ``script`` one turn per model call.
 
     A turn is a list of steps returned together (several ``ToolCall`` steps mean
     parallel tool calls). A bare step is a one-step turn.
+
+    Deliberately not a dataclass: the SDK fingerprints dataclass models with
+    ``dataclasses.asdict``, which deep-copies the script, and a ``WaitFor`` step holds
+    a lock that cannot be copied.
     """
 
-    script: Sequence[Step | Turn]
-    calls: list[RecordedCall] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
+    def __init__(self, script: Sequence[Step | Turn]) -> None:
+        self.script = list(script)
+        self.calls: list[RecordedCall] = []
         self._turns: list[list[Step]] = [
-            [step] if isinstance(step, ToolCall | Reply) else list(step) for step in self.script
+            [step] if isinstance(step, ToolCall | Reply | WaitFor) else list(step)
+            for step in self.script
         ]
         self._cursor = 0
 
@@ -146,11 +172,20 @@ class FakeModel(Model):
             )
         turn_index = self._cursor
         self._cursor += 1
+        steps = self._turns[turn_index]
+        for step in steps:
+            if isinstance(step, WaitFor):
+                released = await asyncio.to_thread(step.event.wait, step.timeout)
+                if not released:
+                    raise TimeoutError(
+                        f"turn {turn_index} waited {step.timeout}s and was not released"
+                    )
         output = [
             _output_item(step, turn_index, step_index)
-            for step_index, step in enumerate(self._turns[turn_index])
+            for step_index, step in enumerate(steps)
+            if not isinstance(step, WaitFor)
         ]
-        return ModelResponse(output=output, usage=Usage(), response_id=None)
+        return ModelResponse(output=output, usage=Usage(), response_id=f"fake_resp_{turn_index}")
 
     async def stream_response(
         self,
@@ -166,8 +201,51 @@ class FakeModel(Model):
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
-        raise NotImplementedError("FakeModel supports Runner.run, not streaming")
-        yield  # pragma: no cover - makes this an async generator
+        """The same scripted turn, delivered as text deltas and a completed event."""
+        response = await self.get_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+        sequence = 0
+        for output_index, item in enumerate(response.output):
+            if not isinstance(item, ResponseOutputMessage):
+                continue
+            for content_index, part in enumerate(item.content):
+                if not isinstance(part, ResponseOutputText):
+                    continue
+                for chunk in re.findall(r"\S+\s*|\s+", part.text):
+                    yield ResponseTextDeltaEvent(
+                        type="response.output_text.delta",
+                        item_id=item.id,
+                        output_index=output_index,
+                        content_index=content_index,
+                        delta=chunk,
+                        logprobs=[],
+                        sequence_number=sequence,
+                    )
+                    sequence += 1
+        yield ResponseCompletedEvent(
+            type="response.completed",
+            sequence_number=sequence,
+            response=Response(
+                id=response.response_id or "fake_resp",
+                created_at=time.time(),
+                model="fake",
+                object="response",
+                output=response.output,
+                parallel_tool_calls=True,
+                tool_choice="auto",
+                tools=[],
+            ),
+        )
 
 
 def _output_item(step: Step, turn_index: int, step_index: int) -> Any:
