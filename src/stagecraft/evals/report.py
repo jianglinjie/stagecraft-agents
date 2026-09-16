@@ -55,6 +55,7 @@ def render_report(suite: SuiteResult) -> str:
         f"- Model under test: `{meta.model}` at `{meta.endpoint}`",
         f"- Judge: {f'`{meta.judge_model}`, {meta.rubric}' if meta.judge_model else 'off'}",
         f"- Cases: {meta.cases}, repeated {meta.repeat}x",
+        f"- Reference corpus: {meta.references or 'not recorded'}",
         f"- Usage: {meta.usage.requests} model requests, {meta.usage.input_tokens:,} input "
         f"tokens, {meta.usage.output_tokens:,} output tokens",
         "- Prompts: "

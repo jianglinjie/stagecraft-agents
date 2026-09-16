@@ -22,8 +22,10 @@ The mechanisms being reproduced, one per milestone:
 5. MCP server/client + a LangGraph rewrite of the same topology with a comparison doc.
 6. An eval set — YAML cases, structured checks on the Plan Store / workspace / tool calls, a
    fixed-rubric LLM judge, markdown reports, and a measured orchestrator prompt change.
+7. Hybrid retrieval for the planner — BM25 + embeddings fused with RRF over `docs/corpus/`;
+   results are pointers and summaries, and cited pointers go into a contract's `sources`.
 
-All six milestones are implemented; README.md has a section per milestone. Milestone 6's
+All seven milestones are implemented; README.md has a section per milestone. Milestone 6's
 before/after prompt comparison still has to be rerun (the endpoint account ran out mid-run).
 
 ## Commands
@@ -45,7 +47,7 @@ Lint and tests must be green before every commit.
 
 ```text
 src/stagecraft/
-  config.py   ModelConfig from OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL
+  config.py   ModelConfig (OPENAI_*), EmbeddingConfig (EMBEDDING_*, falling back to OPENAI_*)
   agents/     orchestrator / router / planner / executor, one file each;
               roles.py is the role -> tool-name table (the only role assembly);
               runtime.py builds the registry and starts sub-agent runs;
@@ -56,7 +58,8 @@ src/stagecraft/
               (SQLite, revision CAS, role guard), errors.py (codes the model sees)
   tools/      registry.py (@tool, ToolSpec, ToolRegistry), results.py (ToolResult / ToolError /
               StructuredToolError), context.py (RunContext: the injected caller role),
-              fake/ (FakeWorkspace + four content tools), plan/ (five plan tools)
+              fake/ (FakeWorkspace + four content tools), plan/ (five plan tools),
+              retrieval.py (ReferenceIndex: BM25 + vectors + RRF, search_references)
   db.py       Database: one connection + lock, nestable transactions (outermost commits)
   assets/     AssetStore: source identity, archive-as-record (DB triggers forbid restore and
               delete), resolve() as the one exit for name lookups, apply_turn_changes()
@@ -75,7 +78,8 @@ src/stagecraft/
               checks.py (structured checks), judge.py (fixed rubric), runner.py, report.py, cli.py
 evals/        run.py (entry point), cases/*.yaml (the eval set), prompts/ (prompts under test)
 tests/        all tests; pytest runs nothing outside this directory
-docs/         framework-comparison.md; evals/ (committed eval reports and their JSON results)
+docs/         framework-comparison.md; retrieval-notes.md; corpus/ (the reference guides the planner
+              searches); evals/ (committed eval reports and their JSON results)
 ```
 
 ## Conventions
@@ -124,6 +128,13 @@ docs/         framework-comparison.md; evals/ (committed eval reports and their 
   enforces it).
 - Endpoint failures (timeouts, rate limits, 5xx) are `error`, never `failed`, and are retried
   once. Tests never run live evals: `tests/test_evals.py` drives the framework with FakeModel.
+- Retrieval results are pointers (`<file stem>#<section slug>`), titles and one-sentence
+  summaries, never section text. Renaming a corpus file or a `##` heading changes pointers.
+- Every corpus section opens with a topic sentence: that sentence is the summary the planner sees.
+- `plan_write_stage_contract` refuses a source the index did not issue. Build the index once per
+  process and load it inside the event loop that serves searches (FastAPI and MCP lifespans).
+- Without embeddings the index runs BM25 only and says so in `mode`; never hide a degraded mode.
+  Tests use a fake embedder and never call `/embeddings`.
 - One milestone = one commit, plus a README section explaining the problem, the design and
   the trade-offs in a form that can be spoken in two minutes.
 - Commit messages: conventional prefix (`feat:`, `chore:`, `docs:`, `test:`), no AI tool

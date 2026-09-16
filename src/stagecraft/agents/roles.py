@@ -24,7 +24,12 @@ ROLE_TOOLS: dict[Role, tuple[str, ...]] = {
         *CONTENT_TOOLS,
     ),
     "router": ("submit_route",),
-    "planner": ("plan_get_stage_detail", "plan_write_stage_contract", "submit_plan"),
+    "planner": (
+        "plan_get_stage_detail",
+        "search_references",
+        "plan_write_stage_contract",
+        "submit_plan",
+    ),
     "executor": (
         "plan_get_stage_detail",
         "plan_attach_runtime",

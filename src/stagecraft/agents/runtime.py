@@ -31,6 +31,7 @@ from stagecraft.tools.context import Role, RunContext
 from stagecraft.tools.fake import FakeWorkspace, build_fake_tools
 from stagecraft.tools.plan import build_plan_tools
 from stagecraft.tools.registry import ToolRegistry, ToolSpec
+from stagecraft.tools.retrieval import ReferenceIndex, build_retrieval_tools
 
 SubRunHook = Callable[[Role, BaseModel, RunResult], None]
 
@@ -53,6 +54,7 @@ class AgentRuntime:
     memory_threshold_tokens: int = 8000
     extra_role_tools: dict[Role, tuple[str, ...]] = field(default_factory=dict)
     instructions: dict[Role, str] = field(default_factory=dict)
+    references: ReferenceIndex = field(default_factory=ReferenceIndex)
     extras: dict[str, Any] = field(default_factory=dict)
     _memories: dict[str, SessionMemory] = field(default_factory=dict, repr=False)
 
@@ -145,24 +147,28 @@ def build_runtime(
     extra_tools: Sequence[ToolSpec] = (),
     extra_role_tools: Mapping[Role, Sequence[str]] | None = None,
     instructions: Mapping[Role, str] | None = None,
+    references: ReferenceIndex | None = None,
 ) -> AgentRuntime:
     """Assemble one chat's runtime.
 
     ``extra_tools`` are registered like any other tool (for example an MCP server's admitted
     tools); ``extra_role_tools`` decides which roles may pick them. ``instructions`` replaces a
-    role's base prompt, so an eval can compare prompts without editing code.
+    role's base prompt, so an eval can compare prompts without editing code. ``references`` is
+    the corpus the planner searches; without one, search finds nothing and sources are refused.
     """
     from stagecraft.agents.dispatch import build_dispatch_tools, build_submit_tools
 
     store = PlanStore() if store is None else store
     workspace = FakeWorkspace() if workspace is None else workspace
     assets = AssetStore(plans=store) if assets is None else assets
+    references = ReferenceIndex() if references is None else references
     if memory_db is None:
         memory_db = Database(session_db if session_db is not None else ":memory:")
     registry = ToolRegistry(
         [
             *build_fake_tools(workspace, assets),
-            *build_plan_tools(store),
+            *build_plan_tools(store, references),
+            *build_retrieval_tools(references),
             *build_asset_tools(assets),
             *extra_tools,
         ]
@@ -182,6 +188,7 @@ def build_runtime(
         memory_threshold_tokens=memory_threshold_tokens,
         extra_role_tools={role: tuple(names) for role, names in (extra_role_tools or {}).items()},
         instructions=dict(instructions or {}),
+        references=references,
     )
     for spec in [*build_submit_tools(), *build_dispatch_tools(runtime)]:
         registry.register(spec)

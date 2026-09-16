@@ -13,6 +13,7 @@ from stagecraft.agents.single import build_openai_model
 from stagecraft.api.app import build_services, create_app
 from stagecraft.config import MissingConfigError
 from stagecraft.memory import ModelCompactor, ModelRewriter
+from stagecraft.tools.retrieval import reference_index_from_env
 
 
 def main() -> int:
@@ -26,6 +27,7 @@ def main() -> int:
         data_dir=Path(os.environ.get("STAGECRAFT_DATA_DIR", ".data")),
         compactor=ModelCompactor(model),
         rewriter=ModelRewriter(model),
+        references=reference_index_from_env(),
     )
     uvicorn.run(
         create_app(services),

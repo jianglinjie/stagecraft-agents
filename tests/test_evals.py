@@ -179,6 +179,26 @@ def test_matchers_compare_after_defaults_and_by_operator() -> None:
     assert value_matches(5, 5) and not value_matches("5", 5)
 
 
+def test_the_sources_check_reads_contracts_in_the_plan_store() -> None:
+    from stagecraft.evals.cases import PlanExpect
+    from stagecraft.evals.checks import _plan
+    from stagecraft.plan import Plan, Stage, StageContract
+
+    cited = Stage(
+        id="stage_01", order=1, goal="g", contract=StageContract(goal="g", sources=["a#b"])
+    )
+    plain = Stage(id="stage_02", order=2, goal="g", contract=StageContract(goal="g"))
+
+    (check,) = _plan(
+        PlanExpect(sources=True), Plan(id="p", chat_id="c", objective="o", stages=[cited])
+    )
+    assert check.passed and check.detail == "stage_01: a#b"
+    (check,) = _plan(
+        PlanExpect(sources=True), Plan(id="p", chat_id="c", objective="o", stages=[plain])
+    )
+    assert not check.passed and check.detail == "none"
+
+
 # -- running ------------------------------------------------------------------------------
 
 

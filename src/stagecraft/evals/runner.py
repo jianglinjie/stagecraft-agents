@@ -38,6 +38,7 @@ from stagecraft.plan import StageState
 from stagecraft.tools.context import Role
 from stagecraft.tools.fake import FakeWorkspace
 from stagecraft.tools.results import StructuredToolError
+from stagecraft.tools.retrieval import ReferenceIndex
 
 CaseStatus = Literal["passed", "failed", "error"]
 ModelsFor = Callable[[EvalCase], Mapping[Role, Model]]
@@ -98,6 +99,7 @@ class SuiteMeta(BaseModel):
     concurrency: int
     seconds: float = 0.0
     usage: Usage = Field(default_factory=Usage)
+    references: str | None = None
 
 
 class SuiteResult(BaseModel):
@@ -115,6 +117,7 @@ async def run_case(
     models: Mapping[Role, Model],
     judge: Judge | None = None,
     instructions: Mapping[Role, str] | None = None,
+    references: ReferenceIndex | None = None,
     attempt: int = 1,
 ) -> CaseResult:
     started = time.monotonic()
@@ -124,6 +127,7 @@ async def run_case(
         models={role: MeteredModel(model, role, meter) for role, model in models.items()},
         workspace=FakeWorkspace(render_delay_seconds=0),
         instructions=instructions,
+        references=references,
     )
     session = CaseSession(runtime)
     checks: list[CheckResult] = []
@@ -236,6 +240,7 @@ async def run_suite(
     meta: SuiteMeta,
     judge: Judge | None = None,
     instructions: Mapping[Role, str] | None = None,
+    references: ReferenceIndex | None = None,
     on_result: Callable[[CaseResult, int, int], Awaitable[None] | None] | None = None,
 ) -> SuiteResult:
     """Every case ``meta.repeat`` times, ``meta.concurrency`` at a time.
@@ -261,6 +266,7 @@ async def run_suite(
                     models=models_for(case),
                     judge=judge,
                     instructions=instructions,
+                    references=references,
                     attempt=attempt,
                 )
                 if result.status == "error":
@@ -269,6 +275,7 @@ async def run_suite(
                         models=models_for(case),
                         judge=judge,
                         instructions=instructions,
+                        references=references,
                         attempt=attempt,
                     )
                     retry.retried = True

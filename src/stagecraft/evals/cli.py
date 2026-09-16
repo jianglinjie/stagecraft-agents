@@ -42,6 +42,7 @@ from stagecraft.evals.runner import (
     run_suite,
 )
 from stagecraft.tools.context import Role
+from stagecraft.tools.retrieval import ReferenceIndex, reference_index_from_env
 
 ROLES: tuple[Role, ...] = ("orchestrator", "router", "planner", "executor")
 
@@ -83,6 +84,7 @@ async def _run(
 
     endpoint = "offline"
     judge_name = judge.model_name if judge is not None else None
+    references: ReferenceIndex | None = None
     if models_for is None:
         try:
             config = ModelConfig.from_env()
@@ -91,6 +93,8 @@ async def _run(
             return 2
         model = build_openai_model(config, max_retries=args.max_retries)
         models_for = _same_model(model)
+        references = reference_index_from_env()
+        await references.load()
         model_name = config.model
         endpoint = urlparse(config.base_url).netloc or config.base_url
         if not args.no_judge and judge is None:
@@ -125,6 +129,7 @@ async def _run(
         cases=len(cases),
         repeat=args.repeat,
         concurrency=args.concurrency,
+        references=_describe_references(references),
     )
     print(
         f"running {len(cases)} case(s) x{args.repeat} on {meta.model} ({endpoint})",
@@ -137,6 +142,7 @@ async def _run(
             meta=meta,
             judge=judge,
             instructions=instructions,
+            references=references,
             on_result=_progress,
         )
     except SuiteAborted as err:
@@ -227,6 +233,13 @@ def _same_model(model: object) -> ModelsFor:
         return same_model_for_all_roles(model)  # type: ignore[arg-type]
 
     return models_for  # type: ignore[return-value]
+
+
+def _describe_references(index: ReferenceIndex | None) -> str:
+    if index is None:
+        return "none"
+    stats = index.stats()
+    return f"{stats.chunks} sections, {stats.mode}"
 
 
 def _progress(result: CaseResult, finished: int, total: int) -> None:

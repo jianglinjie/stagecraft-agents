@@ -91,6 +91,9 @@ class PlanExpect(_Strict):
     upstream_inputs: bool | None = Field(
         default=None, description="Every stage after the first names an upstream stage."
     )
+    sources: bool | None = Field(
+        default=None, description="Some stage's contract cites a reference pointer."
+    )
 
 
 class WorkspaceExpect(_Strict):

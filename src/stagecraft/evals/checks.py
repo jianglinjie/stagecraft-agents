@@ -279,6 +279,15 @@ def _plan(spec: PlanExpect, plan: Plan | None) -> list[CheckResult]:
                 detail=" | ".join(questions) or "none",
             )
         )
+    if spec.sources is not None:
+        cited = {s.id: s.contract.sources for s in stages if s.contract and s.contract.sources}
+        results.append(
+            CheckResult(
+                label="some stage cites a reference" if spec.sources else "no stage cites one",
+                passed=bool(cited) == spec.sources,
+                detail="; ".join(f"{k}: {', '.join(v)}" for k, v in cited.items()) or "none",
+            )
+        )
     if spec.upstream_inputs is not None:
         lacking = [s.id for s in stages[1:] if s.contract is None or not s.contract.inputs]
         results.append(

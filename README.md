@@ -14,6 +14,7 @@
 | 4 | 记忆、压缩、资产池 | 完成 |
 | 5 | MCP server/client + LangGraph 对照 | 完成 |
 | 6 | 评测集 | 框架与基线完成；提示词前后对比待重跑（见第 6 节） |
+| 7 | 混合检索（BM25 + 向量 + RRF） | 完成；向量一路待接入 embeddings 端点（见第 7 节） |
 
 ## 运行
 
@@ -63,8 +64,10 @@ src/stagecraft/
   mcp/       server.py 把产品暴露成 MCP 服务器；client.py 白名单接入外部 MCP 工具
   graph/     同一流程的 LangGraph 版：workflow.py 图与节点；agents.py 节点里的模型调用
   evals/     cases.py 用例模型；trace.py 录制；checks.py 结构化断言；judge.py；runner.py；report.py；cli.py
-evals/       run.py 入口；cases/*.yaml 51 条用例；prompts/ 被评测的提示词版本
-docs/        framework-comparison.md 两种编排方式的对照
+  tools/retrieval.py  ReferenceIndex：BM25 + 向量 + RRF，search_references 工具
+evals/       run.py 入口；cases/*.yaml 52 条用例；prompts/ 被评测的提示词版本
+docs/        framework-comparison.md 两种编排方式的对照；retrieval-notes.md 普通 RAG 与 GraphRAG；
+             corpus/ planner 检索的 12 篇规范
   config.py  模型端点配置（OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL）
 tests/
 ```
@@ -245,7 +248,7 @@ Cursor 的 `.cursor/mcp.json`：
 
 **怎么设计。**
 
-- **用例是数据。** `evals/cases/*.yaml` 共 51 条，分四类：路由 15 条（direct 还是 workflow）、工具调用 12 条（调了什么、参数对不对、有没有多做）、任务完成 10 条（最终 stage 状态和产物）、鲁棒性 14 条（提示词注入、越权写 contract、跳过评审、信息不足应提问）。每条是一段脚本化对话，加上某一轮之后或全部结束后必须成立的条件。工作流用例用「自动批准」模拟用户：只要有 stage 在等评审就回一句批准，直到没有可批的、出现需要回答的问题、某一轮毫无进展，或者到达轮数上限。
+- **用例是数据。** `evals/cases/*.yaml` 共 51 条（里程碑 7 又加了 1 条，现为 52 条），分四类：路由 15 条（direct 还是 workflow）、工具调用 12 条（调了什么、参数对不对、有没有多做）、任务完成 10 条（最终 stage 状态和产物）、鲁棒性 14 条（提示词注入、越权写 contract、跳过评审、信息不足应提问）。每条是一段脚本化对话，加上某一轮之后或全部结束后必须成立的条件。工作流用例用「自动批准」模拟用户：只要有 stage 在等评审就回一句批准，直到没有可批的、出现需要回答的问题、某一轮毫无进展，或者到达轮数上限。
 - **结构化断言优先。** 断言读事实，不读措辞：Plan Store 里每个 stage 的状态，工作区产出了什么（数量、格式、语气），每个角色调了哪些工具、按什么顺序、参数是什么（先补上工具默认值再比较），router 选了哪条路。只有「是否提问」「是否提到某个 id」这几项看回复文本。每条用例默认还查一次 id 是否真实：回复和工具参数里出现的 brief、outline、draft、render、plan、stage id 必须是系统发过的，用户自己打的 id 除外。
 - **加载时校验名字。** `excludes: [plan_write_contract]` 这种拼错的工具名永远通过，所以用例里的工具名必须是某个角色真实持有的，否则加载直接报错。
 - **judge 只评结构管不到的部分。** 固定 rubric 四项：是否回应了请求、下一步是否清楚、对进度的描述是否与系统状态一致、是否简洁。每项 1 到 5 分，带锚点描述；最低分不小于 3、均分不小于 4 才算过。judge 能看到计划和产物的真实状态，所以「说草稿写好了其实没有」会在 honest_status 上被扣分。只有结构化断言全部通过的用例才送 judge。judge 也走 OPENAI_BASE_URL，用 submit 工具交分；`--judge-model` 换一个和被测模型不同的型号，实测用 deepseek-v4-pro 评 deepseek-flash。rubric 带版本号，写进报告。
@@ -297,3 +300,43 @@ uv run python evals/run.py compare docs/evals/baseline.json docs/evals/prompt-v2
 - 工具是假的，所以评测只衡量编排：路由、工具调用、状态推进、闸门和提问，不衡量内容本身的质量。
 
 **测试覆盖。** 用例集：40 到 60 条、四类齐全、id 唯一。加载时报错的情况：工具名拼错、角色不持有该工具、未知匹配算子、跨文件重复 id。匹配算子；代码里的 orchestrator 提示词必须是已记录的版本。执行：direct 用例在脚本化 agent 下通过，参数按默认值补全后比较；失败的检查项写出实际看到的事实；编造的 id 被抓到，用户给的 id 豁免；自动批准把工作流推进到 done；某一轮崩溃算失败，且不再发送后续轮次。错误分类：端点故障算 error 并重跑一次，包括子 agent 内部被 dispatch 工具吞掉的故障；账户被拒（402）时立即中止、不写报告、不再启动新用例，orchestrator 和子 agent 两种情况都测。judge：只在结构化断言通过后运行，按固定阈值判定，看得到系统状态；不交分算 error。报告：分类表、失败详情和发给子 agent 的内容；compare 的分类变化和翻转用例。CLI：离线运行，提示词替换生效并记录指纹，未知用例 id 报错，同名报告默认拒绝覆盖。
+
+---
+
+## 里程碑 7：混合检索
+
+**解决什么问题。** planner 写 contract 时，「面向开发者怎么写」「PDF 规格表放什么」只能靠模型自己的常识。团队已有的受众、语气、格式规范写在文档里，模型看不到；把整份规范塞进提示词，又贵又会稀释注意力。需要按需检索，并让 contract 记下它依据了哪几条规范，评审和执行时都能追溯。
+
+**怎么设计。**
+
+- **语料与切块。** `docs/corpus/` 下 12 篇规范，按 `##` 小节切成 48 块。指针是 `<文件名>#<小节 slug>`，比如 `tone-playful#headlines`。只要文件不改名、小节不改标题，指针就稳定。
+- **两路召回。** BM25（`rank_bm25`）按词匹配，擅长「PDF」「captions」这类精确词，但匹配不到同义改写。向量走 OpenAI 兼容的 `/embeddings`，能用「刚入门的读者」找到 beginners 规范，但对精确词和数字不敏感。两路各取前 20 个候选。
+- **RRF 融合。** BM25 分数没有上界且依赖语料，余弦相似度挤在一个窄区间里且依赖模型，两者不能直接相加，归一化又要调参，任何一边一换就失效。RRF 只看名次：`score = Σ 1/(60 + rank)`。两路都排在前面的文档，胜过只在一路排第一的文档。同分时依次比较命中路数、最好名次和指针，顺序是确定的。
+- **只回指针和摘要。** `search_references` 的每条结果只有指针、标题、首句摘要（最多 160 字符）、融合分数和命中的检索路，不含正文。和其他工具一样，结果只放下一步决策需要的东西。
+- **指针写进 contract 的 sources。** `plan_write_stage_contract` 新增 `sources` 参数，写入前逐个检查指针是否在索引里；编造的指针返回 `not_found`，提示照 `search_references` 返回的原样使用。信索引，不信作者的记忆。planner 提示词加了一条：stage 依赖受众、语气、格式或系列约定时先检索，把用到的指针写进 sources。检索工具只给 planner；executor 通过 `plan_get_stage_detail` 看到 contract 里的指针。
+- **启动时建索引，降级要说出来。** HTTP 服务和 MCP 服务在 lifespan 里建索引，和之后处理检索请求的是同一个事件循环；命令行在启动时建。embeddings 端点可以单独配置（`EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL`），默认沿用聊天端点。端点不可用时记一条告警、只用 BM25，每次结果的 `mode` 都写明 `bm25_only`；单次查询的向量失败只降级那一次。
+- **RAG 与 GraphRAG。** 见 [docs/retrieval-notes.md](docs/retrieval-notes.md)。
+- **评测也用上语料。** 真实模型的评测运行会加载同一份语料，报告头写明语料规模和检索模式。新增一条用例：依赖受众、语气和格式约定的计划，planner 要先检索，再把指针写进 contract。
+
+**为什么只回指针。** 这和其他工具的规则一样：planner 要决定的是「这个 stage 依据哪几条规范」，不需要读完正文。正文进上下文要花 token，还会让模型去复述规范，而不是引用规范。指针写进 contract 以后，评审时看得到依据。目前还没有按指针读取正文的工具，executor 只在 `plan_get_stage_detail` 的结果里看到这些指针。
+
+**取舍。**
+
+- 摘要用小节首句，不调模型生成。好处是确定、零成本；前提是语料每节都以主题句开头，所以写语料要守这条规矩。
+- 分词只做英文小写和停用词，不做词干还原，也不做中文分词。「render」和「rendering」在 BM25 里是两个词，这正是向量那一路要补的。
+- BM25 的候选按「是否和查询有共同词」筛，再按分数排序，不用「分数大于 0」。Okapi 的 IDF 对出现在一半以上小节里的词是零或负数，语料小的时候，真正匹配的小节会被过滤掉；这是写测试时发现的。
+- 向量召回没有相似度下限，无关的查询也会返回 top-k，是否采用由 planner 看摘要判断。语料只有几十块，直接点积就够了，不需要向量数据库。
+- 索引在内存里，启动时全量构建，改了语料要重启才生效。embedding 没有缓存，语料变大以后应该按内容哈希缓存。
+- 图版（LangGraph）的 planner 没有接检索。
+
+**实测。** DeepSeek 没有 embeddings 接口，`/v1/embeddings` 返回 404。用仓库里的 `.env` 启动索引：48 个小节，记一条告警后进入 BM25-only 模式，每次结果都标明 `bm25_only`。「playful tone headlines for a developer audience」「PDF datasheet specification table」「captions and length for a short video」这几类查询，排第一的分别是对应规范的对应小节。「people new to the topic」这种改写式查询，BM25 找不到 beginners 规范，排第一的是因为「people」一词命中的管理者规范，这正是向量那一路要解决的问题。向量召回和两路融合只在测试里用假 embedder 验证过；配置一个提供 embeddings 的端点（`EMBEDDING_BASE_URL` 等）即可启用混合模式。planner 调用检索、把指针写进 contract 的端到端流程，在测试里用脚本化模型跑通；真实模型的验证和里程碑 6 的对比一样，要等账户充值后再跑，命令是 `uv run --env-file .env python evals/run.py --case tools-planner-cites-references --repeat 3`。
+
+**测试覆盖。**
+
+- **RRF：** 按名次倒数求和的顺序与手算一致；两路都靠前的胜过单路第一；k 决定第一名的权重；同分时顺序确定。
+- **切块：** 指针稳定，标题正确，摘要取首句并截断。
+- **检索：** 结果只含指针、标题、摘要、分数和命中路，正文里的句子不会出现在工具结果里。用假 embedder 时，向量召回到 BM25 找不到的小节，两路都命中的排在前面。embeddings 失败时降级为 BM25 并告警。仓库自带的语料能回答格式和语气问题。
+- **配置：** embeddings 配置默认沿用聊天端点，可单独指定，也可以关掉。
+- **contract：** 索引里的指针能写进 sources；编造的指针被拒，计划不变；没有配置语料时，任何 sources 都被拒。
+- **端到端：** planner 先检索，再把指针写进 contract；executor 不持有检索工具。
+- **评测：** sources 检查读的是 Plan Store 里的 contract。

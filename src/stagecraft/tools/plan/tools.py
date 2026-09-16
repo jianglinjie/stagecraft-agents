@@ -17,7 +17,7 @@ own reading of the transcript.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from pydantic import Field
 
@@ -34,7 +34,10 @@ from stagecraft.plan import (
 )
 from stagecraft.tools.context import RunContext
 from stagecraft.tools.registry import ToolSpec, tool
-from stagecraft.tools.results import ToolResult
+from stagecraft.tools.results import StructuredToolError, ToolResult
+
+if TYPE_CHECKING:
+    from stagecraft.tools.retrieval import ReferenceIndex
 
 ExpectedRevision = Annotated[
     int | None,
@@ -122,7 +125,9 @@ def stage_detail(plan: Plan, stage: Stage) -> StageDetail:
     )
 
 
-def build_plan_tools(store: PlanStore) -> list[ToolSpec]:
+def build_plan_tools(store: PlanStore, references: ReferenceIndex | None = None) -> list[ToolSpec]:
+    """The five plan tools. ``references`` is the index a contract's sources must come from."""
+
     @tool
     def plan_create(
         ctx: RunContext,
@@ -146,7 +151,7 @@ def build_plan_tools(store: PlanStore) -> list[ToolSpec]:
         return stage_detail(plan, stage)
 
     @tool
-    def plan_write_stage_contract(
+    async def plan_write_stage_contract(
         ctx: RunContext,
         plan_id: Annotated[str, "Plan id."],
         goal: Annotated[str, "What this stage must produce."],
@@ -159,11 +164,19 @@ def build_plan_tools(store: PlanStore) -> list[ToolSpec]:
             str | None, "Omit to author a new stage; pass an id to rewrite a pending one."
         ] = None,
         order: Annotated[int | None, "Position in the plan. Omit to append."] = None,
+        sources: Annotated[
+            list[str], "Pointers from search_references that this stage relies on."
+        ] = [],  # noqa: B006
         expected_revision: ExpectedRevision = None,
     ) -> StageWritten:
         """Author one stage's contract. Write exactly one stage per call."""
+        await _require_known_sources(references, sources)
         contract = StageContract(
-            goal=goal, inputs=inputs, work_items=work_items, acceptance=acceptance
+            goal=goal,
+            inputs=inputs,
+            work_items=work_items,
+            acceptance=acceptance,
+            sources=sources,
         )
         plan, stage = store.write_stage_contract(
             plan_id=plan_id,
@@ -230,3 +243,20 @@ def build_plan_tools(store: PlanStore) -> list[ToolSpec]:
         plan_attach_runtime,
         plan_update_stage_state,
     ]
+
+
+async def _require_known_sources(references: ReferenceIndex | None, sources: list[str]) -> None:
+    """A source is a pointer the index issued. Trust the index, not the author's memory."""
+    if not sources:
+        return
+    unknown = (
+        list(sources)
+        if references is None
+        else [pointer for pointer in sources if not await references.has(pointer)]
+    )
+    if unknown:
+        raise StructuredToolError(
+            f"unknown source pointer(s): {', '.join(unknown)}",
+            code="not_found",
+            hint="Use pointers exactly as search_references returned them, or leave sources empty.",
+        )

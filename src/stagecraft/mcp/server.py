@@ -69,6 +69,7 @@ class PlanView(BaseModel):
 def build_mcp_server(services: Services, *, name: str = "stagecraft") -> MCPServer:
     @asynccontextmanager
     async def lifespan(_: MCPServer) -> AsyncIterator[None]:
+        await services.references.load()
         yield
         await services.turns.shutdown()
 

@@ -172,9 +172,16 @@ async def _main(argv: Sequence[str]) -> int:
         print(f"error: {err}", file=sys.stderr)
         return 2
     from stagecraft.memory import ModelCompactor
+    from stagecraft.tools.retrieval import reference_index_from_env
 
+    references = reference_index_from_env()
+    stats = await references.load()
+    print(f"references: {stats.chunks} sections, {stats.mode}", file=sys.stderr)
     runtime = build_runtime(
-        chat_id="cli", models=same_model_for_all_roles(model), compactor=ModelCompactor(model)
+        chat_id="cli",
+        models=same_model_for_all_roles(model),
+        compactor=ModelCompactor(model),
+        references=references,
     )
     runtime.on_sub_run = _print_sub_run
 

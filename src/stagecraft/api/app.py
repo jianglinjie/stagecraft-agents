@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Annotated
 
@@ -34,6 +34,7 @@ from stagecraft.memory import Compactor, LongTermMemory, Rewriter
 from stagecraft.plan import PlanStore
 from stagecraft.tools.context import Role
 from stagecraft.tools.fake import FakeWorkspace
+from stagecraft.tools.retrieval import ReferenceIndex
 
 
 @dataclass
@@ -48,6 +49,7 @@ class Services:
     runtime_for: Callable[[str], AgentRuntime]
     rewriter: Rewriter | None = None
     heartbeat: float = 15.0
+    references: ReferenceIndex = field(default_factory=ReferenceIndex)
 
 
 def build_services(
@@ -62,6 +64,7 @@ def build_services(
     compactor: Compactor | None = None,
     rewriter: Rewriter | None = None,
     memory_threshold_tokens: int = 8000,
+    references: ReferenceIndex | None = None,
 ) -> Services:
     if data_dir is not None:
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -77,6 +80,7 @@ def build_services(
     leases = LeaseStore(app_path, clock=clock)
     long_term = LongTermMemory(memory_db)
     bus = EventBus()
+    references = ReferenceIndex() if references is None else references
     runtimes: dict[str, AgentRuntime] = {}
 
     def runtime_for(session_id: str) -> AgentRuntime:
@@ -93,6 +97,7 @@ def build_services(
                 long_term=long_term,
                 topic=record.topic if record else None,
                 memory_threshold_tokens=memory_threshold_tokens,
+                references=references,
             )
         return runtimes[session_id]
 
@@ -117,6 +122,7 @@ def build_services(
         runtime_for=runtime_for,
         rewriter=rewriter,
         heartbeat=heartbeat,
+        references=references,
     )
 
 
@@ -143,6 +149,8 @@ class ExtractMemory(BaseModel):
 def create_app(services: Services) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # The index is built here, inside the loop that will serve searches.
+        await services.references.load()
         yield
         await services.turns.shutdown()
 

@@ -185,3 +185,18 @@ cases:
           render: {min: 1}
       output:
         contains_any: [render_0001]
+
+  - id: tools-planner-cites-references
+    description: >-
+      A plan that depends on audience, tone and format conventions searches the reference
+      guides and cites what it used.
+    turns:
+      - user: >-
+          Write a two-part tutorial series about https://example.com/p/33 for beginners, playful
+          tone, as HTML. Show me the plan first.
+        expect:
+          calls:
+            planner:
+              ordered: [search_references, plan_write_stage_contract]
+          plan:
+            sources: true
