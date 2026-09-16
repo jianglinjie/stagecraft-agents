@@ -36,9 +36,12 @@ Lint and tests must be green before every commit.
 
 ```text
 src/stagecraft/
-  agents/     one file per role; dispatch_* tools live next to the orchestrator
+  config.py   ModelConfig from OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL
+  agents/     one file per role; dispatch_* tools live next to the orchestrator;
+              fake_model.py is the scripted Model used by every test
   plan/       Plan / Stage models, state machine, PlanStore (SQLite)
-  tools/      registry + fake tools + plan tools
+  tools/      registry.py (@tool, ToolSpec, ToolRegistry), results.py (ToolResult / ToolError),
+              fake/ (FakeWorkspace + the four content tools), plan tools later
   memory/     session memory, compaction, long-term memory interface
   api/        FastAPI app, SSE, event bus, leases
   mcp/        MCP server (FastMCP) and client
