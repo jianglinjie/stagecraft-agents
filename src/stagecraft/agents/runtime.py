@@ -7,7 +7,7 @@ itself to start sub-agent runs.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,7 +30,7 @@ from stagecraft.tools.assets import build_asset_tools
 from stagecraft.tools.context import Role, RunContext
 from stagecraft.tools.fake import FakeWorkspace, build_fake_tools
 from stagecraft.tools.plan import build_plan_tools
-from stagecraft.tools.registry import ToolRegistry
+from stagecraft.tools.registry import ToolRegistry, ToolSpec
 
 SubRunHook = Callable[[Role, BaseModel, RunResult], None]
 
@@ -51,6 +51,7 @@ class AgentRuntime:
     long_term: LongTermMemory | None = None
     topic: str | None = None
     memory_threshold_tokens: int = 8000
+    extra_role_tools: dict[Role, tuple[str, ...]] = field(default_factory=dict)
     extras: dict[str, Any] = field(default_factory=dict)
     _memories: dict[str, SessionMemory] = field(default_factory=dict, repr=False)
 
@@ -64,7 +65,7 @@ class AgentRuntime:
             self._memories[key] = SessionMemory(
                 key,
                 self.memory_db,
-                known_tools=ROLE_TOOLS[role],
+                known_tools=self.tool_names(role),
                 threshold_tokens=self.memory_threshold_tokens,
             )
         return self._memories[key]
@@ -85,8 +86,11 @@ class AgentRuntime:
         except KeyError:
             raise KeyError(f"no model configured for role {role!r}") from None
 
+    def tool_names(self, role: Role) -> tuple[str, ...]:
+        return (*ROLE_TOOLS[role], *self.extra_role_tools.get(role, ()))
+
     def tools(self, role: Role) -> list[FunctionTool]:
-        return self.registry.select(*ROLE_TOOLS[role])
+        return self.registry.select(*self.tool_names(role))
 
     def context(self, role: Role, **kwargs: Any) -> RunContext:
         return RunContext(role=role, chat_id=self.chat_id, **kwargs)
@@ -133,7 +137,14 @@ def build_runtime(
     long_term: LongTermMemory | None = None,
     topic: str | None = None,
     memory_threshold_tokens: int = 8000,
+    extra_tools: Sequence[ToolSpec] = (),
+    extra_role_tools: Mapping[Role, Sequence[str]] | None = None,
 ) -> AgentRuntime:
+    """Assemble one chat's runtime.
+
+    ``extra_tools`` are registered like any other tool (for example an MCP server's admitted
+    tools); ``extra_role_tools`` decides which roles may pick them.
+    """
     from stagecraft.agents.dispatch import build_dispatch_tools, build_submit_tools
 
     store = PlanStore() if store is None else store
@@ -146,6 +157,7 @@ def build_runtime(
             *build_fake_tools(workspace, assets),
             *build_plan_tools(store),
             *build_asset_tools(assets),
+            *extra_tools,
         ]
     )
     runtime = AgentRuntime(
@@ -161,6 +173,7 @@ def build_runtime(
         long_term=long_term,
         topic=topic,
         memory_threshold_tokens=memory_threshold_tokens,
+        extra_role_tools={role: tuple(names) for role, names in (extra_role_tools or {}).items()},
     )
     for spec in [*build_submit_tools(), *build_dispatch_tools(runtime)]:
         registry.register(spec)

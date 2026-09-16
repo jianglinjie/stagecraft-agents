@@ -12,7 +12,7 @@
 | 2 | 四角色 + dispatch-and-return + Plan Store | 完成 |
 | 3 | 可恢复的 turn、人工介入、SSE、租约 | 完成 |
 | 4 | 记忆、压缩、资产池 | 完成 |
-| 5 | MCP server/client + LangGraph 对照 | 计划中 |
+| 5 | MCP server/client + LangGraph 对照 | 完成 |
 
 ## 运行
 
@@ -50,6 +50,9 @@ src/stagecraft/
   memory/    turn_context.py；session_memory.py；items.py 历史修复；compaction.py；long_term.py
   assets/    model.py；store.py（来源身份、归档记录、统一出口）；errors.py
   db.py      可嵌套组合的 SQLite 事务
+  mcp/       server.py 把产品暴露成 MCP 服务器；client.py 白名单接入外部 MCP 工具
+  graph/     同一流程的 LangGraph 版：workflow.py 图与节点；agents.py 节点里的模型调用
+docs/        framework-comparison.md 两种编排方式的对照
   config.py  模型端点配置（OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL）
 tests/
 ```
@@ -174,4 +177,51 @@ tests/
 **实测（DeepSeek）。** 第一轮随消息上传 hero 和 logo 两张图，模型写草稿时通过统一出口引用了两者。第二轮用户说「以后别用 logo」，模型以 `user_request` 归档 logo，再只用 hero 重写草稿。三轮之后对存储的历史做压缩：29 条、约 3369 token 变成 16 条、约 2385 token，摘要保留了 brief、outline、draft 的 id 和用户的决定。对这个会话提取长期记忆，得到的档案包括读者是开发者、偏好活泼语气、logo 已被拒绝不要再用。
 
 **测试覆盖。** 历史修复：正常历史不变；已退役工具的调用折叠成保留参数和结果的说明；被中断的调用变成说明；孤儿结果被丢弃；长内容截断。会话记忆：重启后恢复；pop 与 clear；读取时修复但存储不变，工具改回原名后历史复原；切点落在用户消息上并保留最近几轮；压缩替换旧轮次；低于阈值不压缩；摘要失败时什么都不变且下次成功；压缩后跑新一轮时模型先看到摘要。资产：同来源只更新；重名加序号；归档是记录且之后无法使用；重复归档只报告；数据库拒绝恢复和删除，再次登记变成新资产；统一出口列出所有问题；归档回报未完成的依赖 stage；本轮变更要么全部落库、要么都不落。长期记忆：整体重写不追加；有长度上限；并发重写合并而不覆盖。Agent 层：两个按名取资产的工具拒绝方式完全一致；有依赖时归档被拒、强制后才归档并记录触发消息；Turn Context 出现在每次模型调用中、计划变化后被重建、从不进入会话记忆；主题档案出现在 Turn Context 里。HTTP：上传和面板归档随消息一起落库，并出现在下一轮的 Turn Context 中；资产变更被拒时消息、turn、资产都不落库，且可以用同一个消息 id 重试；从会话提取长期记忆。
+
+---
+
+## 里程碑 5：MCP 与 LangGraph 对照
+
+**解决什么问题。** 两件事。一是边界：产品要能被 IDE 和其他 agent 调用，也要能用外部 MCP 服务器提供的工具，但两个方向都不能绕过产品自己的规则。二是框架选择：把同一个多角色流程用 Agents SDK 的「模型编排」和 LangGraph 的「图编排」各写一遍，才能讲清两者的差别，而不是背概念。
+
+**怎么设计。**
+
+- **MCP 服务器只暴露用户层操作。** `create_session`、`send_message`、`get_plan`、`get_stage_detail` 四个工具，与 HTTP 接口一一对应。外部 agent 是产品的用户，不是子 agent：它不能直接改 stage 状态、写契约或调用内容工具，只能发消息，所以确认闸门、租约、消息幂等对它同样生效。`send_message` 默认等待本轮结束，并把每次工具调用转成 MCP progress 通知，相当于把 SSE 事件流换成请求/响应协议能承载的形态。传输走 stdio，日志只写 stderr。
+- **MCP 客户端默认拒绝。** 外部服务器配置在 `STAGECRAFT_MCP_SERVERS`（JSON 列表），每个服务器必须显式列出 `allowed_tools`，写 `["*"]` 才是全部放行。放行的工具以 `<server>__<tool>` 注册进同一个注册表，角色还要在 `extra_role_tools` 里点名才能持有。schema 原样展示给模型，参数校验交给服务器；服务器报错变成 `tool_failed` 结果。header 和 env 里的 `${VAR}` 从环境变量展开，密钥不写进配置本身。
+- **LangGraph 版。** `src/stagecraft/graph/` 用 `StateGraph` 重写同一流程：route 之后分 direct 和 plan；plan 有问题时进入 ask（interrupt）；随后 present_review 把 stage 置为待评审，await_review 用 interrupt 等决定，驳回回到 plan 改写，批准进入 execute；execute 之后重试、进入下一个评审或结束。计划存在图状态里，由 checkpointer 按 thread_id 存档；换一个 SQLite checkpointer 实例照样从停下的节点接着跑。所有状态变化仍然经过同一个 `check_transition`。
+- **对照文档。** [docs/framework-comparison.md](docs/framework-comparison.md) 从控制流、状态位置、中断与恢复、可观测性、MCP 配合五个维度比较，每段附取舍。
+
+**MCP 在这里的边界。** 对外，暴露「用户能做的事」，不暴露内部工具；对内，外部工具默认拒绝、逐个放行、角色点名才能用。两个方向的规则都和编排框架无关。
+
+**在 Claude Code 或 Cursor 里使用。** 路径换成本机的绝对路径。
+
+```bash
+claude mcp add stagecraft -- uv run --directory /abs/path/stagecraft-agents \
+  --env-file /abs/path/stagecraft-agents/.env python -m stagecraft.mcp
+```
+
+Cursor 的 `.cursor/mcp.json`：
+
+```json
+{
+  "mcpServers": {
+    "stagecraft": {
+      "command": "uv",
+      "args": ["run", "--directory", "/abs/path/stagecraft-agents",
+               "--env-file", "/abs/path/stagecraft-agents/.env",
+               "python", "-m", "stagecraft.mcp"]
+    }
+  }
+}
+```
+
+**取舍。**
+
+- MCP 的 `send_message` 同步等待一轮，长任务可能超过客户端超时。这时传 `wait=false` 立即返回，再用 `get_plan` 查看进度。
+- 外部工具的参数不在本地校验，错误要等服务器返回。
+- 图版的 agent 不读写 Plan Store，节点直接把状态切片交给它们，所以图版没有「executor 只拿指针、自己读契约」这一层。
+
+**实测（DeepSeek）。** 用 MCP 客户端通过 stdio 启动服务器：发一条消息后依次收到 dispatch_router、plan_create、dispatch_planner、plan_update_stage_state 四条 progress 通知，本轮停在 plan_review；`get_plan` 返回四个 stage 和下一步动作，`get_stage_detail` 返回第一个 stage 的契约。图版跑同一类请求：planner 写出四个 stage，图在每个 stage 执行前用 interrupt 停下，逐个批准后四个 stage 依次完成。
+
+**测试覆盖。** MCP 服务器（内存客户端）：只有四个用户层工具，没有内部工具，`ctx` 不在 schema 里；发消息会等待本轮，并把工具调用按顺序转成 progress；结果带计划摘要和下一步；同一个消息 id 重发返回 duplicate；`get_plan` 与 `get_stage_detail` 正常；未知会话、运行中再发、没有计划时都返回工具错误。MCP 客户端：从环境变量读取配置并展开密钥；缺变量、传输方式冲突、缺白名单、格式错误都被拒绝；只放行白名单里的工具，schema 原样、结构化结果、服务器错误变成 `tool_failed`；角色不点名就拿不到外部工具，orchestrator 点名后能调用。LangGraph：direct 路径一个节点就结束；提问、回答、评审、部分完成后重试、驳回后改写、批准、完成的完整流程，检查每次中断载荷、checkpoint 里的状态、节点交给 agent 的 payload；关掉 SQLite checkpointer 后重新打开并恢复；驳回时 executor 从未被调用，两次都没有产出时 stage 变为 blocked。
 

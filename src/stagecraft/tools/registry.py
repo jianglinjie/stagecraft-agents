@@ -16,6 +16,7 @@ name with :meth:`ToolRegistry.select`, which adapts them to the SDK's
 
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -56,6 +57,7 @@ class ToolSpec:
     is_async: bool
     context_param: str | None = None
     context_optional: bool = False
+    schema_override: dict[str, Any] | None = None
 
     @classmethod
     def from_function(
@@ -119,6 +121,9 @@ class ToolSpec:
     @property
     def params_json_schema(self) -> dict[str, Any]:
         """The parameter schema the model is shown."""
+        if self.schema_override is not None:
+            # Owned elsewhere (an MCP server): show it verbatim, let its owner validate.
+            return copy.deepcopy(self.schema_override)
         schema = self.params_model.model_json_schema()
         schema.setdefault("additionalProperties", False)
         return schema
@@ -150,6 +155,7 @@ class ToolSpec:
             )
 
         kwargs = {field: getattr(params, field) for field in self.params_model.model_fields}
+        kwargs.update(params.model_extra or {})
         if self.context_param is not None:
             if not isinstance(context, RunContext) and not self.context_optional:
                 return ToolError(

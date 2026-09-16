@@ -21,6 +21,8 @@ The mechanisms being reproduced, one per milestone:
    dedup, archive-as-record, single rejection path.
 5. MCP server/client + a LangGraph rewrite of the same topology with a comparison doc.
 
+All five milestones are implemented; README.md has a section per milestone.
+
 ## Commands
 
 ```bash
@@ -28,6 +30,8 @@ uv sync                 # install (creates .venv)
 uv run ruff check .     # lint
 uv run ruff format .    # format
 uv run pytest           # tests (tests/ only)
+uv run --env-file .env python -m stagecraft.api   # HTTP + SSE on :8000
+uv run --env-file .env python -m stagecraft.mcp   # MCP server on stdio
 ```
 
 Lint and tests must be green before every commit.
@@ -57,9 +61,13 @@ src/stagecraft/
   api/        app.py (routes, build_services), turns.py (TurnService: lease -> background run ->
               events), events.py (EventBus: bounded log + broadcast + seq), leases.py (SQLite TTL
               lease), sessions.py (sessions, messages, turns; client_message_id idempotency)
-  mcp/        MCP server (FastMCP) and client
+  mcp/        server.py (build_mcp_server: user-level tools only, turn events as progress),
+              client.py (McpToolBridge: deny-by-default allowed_tools, <server>__<tool> names),
+              __main__.py (stdio entry point; logs to stderr only)
+  graph/      the same flow on LangGraph: workflow.py (StateGraph, interrupt, checkpointer),
+              agents.py (GraphDeps and the node-level agents)
 tests/        all tests; pytest runs nothing outside this directory
-docs/         design notes and comparisons
+docs/         framework-comparison.md
 ```
 
 ## Conventions
@@ -91,6 +99,13 @@ docs/         design notes and comparisons
   and not in session memory.
 - Renaming or removing a tool is safe for stored history (repair on read), but keep
   `ROLE_TOOLS` accurate: repair uses it to decide which calls are retired.
+- The MCP server exposes what a *user* can do (sessions, messages, reading the plan). Never add
+  an internal tool such as `plan_update_stage_state` to it: that would bypass review.
+- External MCP tools are admitted only through `allowed_tools`, and a role must name them in
+  `extra_role_tools` to hold them.
+- This project uses the `mcp` 2.x SDK: `MCPServer` (not FastMCP) and `mcp.client.Client`.
+- In the LangGraph version, code before `interrupt()` re-runs on resume: keep it idempotent,
+  and commit state changes in an earlier node when they must be visible while waiting.
 - Durable state lives in the Plan Store and the session tables, not in the transcript.
 - One milestone = one commit, plus a README section explaining the problem, the design and
   the trade-offs in a form that can be spoken in two minutes.
