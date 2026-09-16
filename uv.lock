@@ -1376,6 +1376,7 @@ dependencies = [
     { name = "mcp" },
     { name = "openai-agents" },
     { name = "pydantic" },
+    { name = "pyyaml" },
     { name = "uvicorn" },
 ]
 
@@ -1395,6 +1396,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=2.2.0" },
     { name = "openai-agents" },
     { name = "pydantic", specifier = ">=2" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "uvicorn" },
 ]
 

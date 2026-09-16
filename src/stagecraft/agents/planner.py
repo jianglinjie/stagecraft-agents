@@ -52,7 +52,11 @@ SUBMIT_TOOL = "submit_plan"
 def build_planner(runtime: AgentRuntime) -> Agent:
     return Agent(
         name="planner",
-        instructions=PLANNER_INSTRUCTIONS + "\n\n" + executor_capabilities(runtime),
+        instructions=(
+            runtime.instructions_for("planner", PLANNER_INSTRUCTIONS)
+            + "\n\n"
+            + executor_capabilities(runtime)
+        ),
         model=runtime.model("planner"),
         tools=runtime.tools("planner"),
         tool_use_behavior=stop_on_submit(SUBMIT_TOOL),

@@ -46,7 +46,7 @@ SUBMIT_TOOL = "submit_route"
 def build_router(runtime: AgentRuntime) -> Agent:
     return Agent(
         name="router",
-        instructions=ROUTER_INSTRUCTIONS,
+        instructions=runtime.instructions_for("router", ROUTER_INSTRUCTIONS),
         model=runtime.model("router"),
         tools=runtime.tools("router"),
         tool_use_behavior=stop_on_submit(SUBMIT_TOOL),

@@ -87,7 +87,8 @@ def build_orchestrator(runtime: AgentRuntime, changes: TurnAssetChanges | None =
     def instructions(_ctx: RunContextWrapper[Any], _agent: Agent) -> str:
         # Rebuilt on every model call, so the plan summary is current mid-turn, and never
         # written to session memory, because the SDK does not store instructions.
-        return ORCHESTRATOR_INSTRUCTIONS + "\n\n" + runtime.turn_context(changes).render()
+        base = runtime.instructions_for("orchestrator", ORCHESTRATOR_INSTRUCTIONS)
+        return base + "\n\n" + runtime.turn_context(changes).render()
 
     return Agent(
         name="orchestrator",

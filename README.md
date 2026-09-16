@@ -13,6 +13,7 @@
 | 3 | 可恢复的 turn、人工介入、SSE、租约 | 完成 |
 | 4 | 记忆、压缩、资产池 | 完成 |
 | 5 | MCP server/client + LangGraph 对照 | 完成 |
+| 6 | 评测集 | 框架与基线完成；提示词前后对比待重跑（见第 6 节） |
 
 ## 运行
 
@@ -23,6 +24,15 @@ uv run pytest             # 测试用脚本化的假模型，不联网
 uv run --env-file .env python -m stagecraft.agents.single "Turn https://example.com/p/1 into a short article."
 uv run --env-file .env python -m stagecraft.agents.single --chat "Fetch https://example.com/p/1"   # 多轮
 uv run --env-file .env python -m stagecraft.agents.orchestrator "Write a two-part series about https://example.com/p/1, review the plan first."
+```
+
+评测（真实模型，报告默认写到 `.data/evals/`）：
+
+```bash
+uv run --env-file .env python evals/run.py --category routing                # 只跑一类
+uv run --env-file .env python evals/run.py --label baseline --repeat 3 \
+  --prompt orchestrator=evals/prompts/orchestrator-v1.md --judge-model deepseek-v4-pro
+uv run python evals/run.py compare .data/evals/baseline.json .data/evals/prompt-v2.json
 ```
 
 HTTP 服务（数据默认写到 `.data/`）：
@@ -52,6 +62,8 @@ src/stagecraft/
   db.py      可嵌套组合的 SQLite 事务
   mcp/       server.py 把产品暴露成 MCP 服务器；client.py 白名单接入外部 MCP 工具
   graph/     同一流程的 LangGraph 版：workflow.py 图与节点；agents.py 节点里的模型调用
+  evals/     cases.py 用例模型；trace.py 录制；checks.py 结构化断言；judge.py；runner.py；report.py；cli.py
+evals/       run.py 入口；cases/*.yaml 51 条用例；prompts/ 被评测的提示词版本
 docs/        framework-comparison.md 两种编排方式的对照
   config.py  模型端点配置（OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL）
 tests/
@@ -225,3 +237,63 @@ Cursor 的 `.cursor/mcp.json`：
 
 **测试覆盖。** MCP 服务器（内存客户端）：只有四个用户层工具，没有内部工具，`ctx` 不在 schema 里；发消息会等待本轮，并把工具调用按顺序转成 progress；结果带计划摘要和下一步；同一个消息 id 重发返回 duplicate；`get_plan` 与 `get_stage_detail` 正常；未知会话、运行中再发、没有计划时都返回工具错误。MCP 客户端：从环境变量读取配置并展开密钥；缺变量、传输方式冲突、缺白名单、格式错误都被拒绝；只放行白名单里的工具，schema 原样、结构化结果、服务器错误变成 `tool_failed`；角色不点名就拿不到外部工具，orchestrator 点名后能调用。LangGraph：direct 路径一个节点就结束；提问、回答、评审、部分完成后重试、驳回后改写、批准、完成的完整流程，检查每次中断载荷、checkpoint 里的状态、节点交给 agent 的 payload；关掉 SQLite checkpointer 后重新打开并恢复；驳回时 executor 从未被调用，两次都没有产出时 stage 变为 blocked。
 
+---
+
+## 里程碑 6：评测集
+
+**解决什么问题。** 改了提示词、换了模型、调了工具说明，怎么知道是变好还是变坏？手工试几条对话，只能看到自己想得到的情况；模型输出又有随机性，同一条请求这次对、下次错。需要一套固定用例，一条命令跑完，结果能说清失败在哪、能和上一次对比。
+
+**怎么设计。**
+
+- **用例是数据。** `evals/cases/*.yaml` 共 51 条，分四类：路由 15 条（direct 还是 workflow）、工具调用 12 条（调了什么、参数对不对、有没有多做）、任务完成 10 条（最终 stage 状态和产物）、鲁棒性 14 条（提示词注入、越权写 contract、跳过评审、信息不足应提问）。每条是一段脚本化对话，加上某一轮之后或全部结束后必须成立的条件。工作流用例用「自动批准」模拟用户：只要有 stage 在等评审就回一句批准，直到没有可批的、出现需要回答的问题、某一轮毫无进展，或者到达轮数上限。
+- **结构化断言优先。** 断言读事实，不读措辞：Plan Store 里每个 stage 的状态，工作区产出了什么（数量、格式、语气），每个角色调了哪些工具、按什么顺序、参数是什么（先补上工具默认值再比较），router 选了哪条路。只有「是否提问」「是否提到某个 id」这几项看回复文本。每条用例默认还查一次 id 是否真实：回复和工具参数里出现的 brief、outline、draft、render、plan、stage id 必须是系统发过的，用户自己打的 id 除外。
+- **加载时校验名字。** `excludes: [plan_write_contract]` 这种拼错的工具名永远通过，所以用例里的工具名必须是某个角色真实持有的，否则加载直接报错。
+- **judge 只评结构管不到的部分。** 固定 rubric 四项：是否回应了请求、下一步是否清楚、对进度的描述是否与系统状态一致、是否简洁。每项 1 到 5 分，带锚点描述；最低分不小于 3、均分不小于 4 才算过。judge 能看到计划和产物的真实状态，所以「说草稿写好了其实没有」会在 honest_status 上被扣分。只有结构化断言全部通过的用例才送 judge。judge 也走 OPENAI_BASE_URL，用 submit 工具交分；`--judge-model` 换一个和被测模型不同的型号，实测用 deepseek-v4-pro 评 deepseek-flash。rubric 带版本号，写进报告。
+- **失败和错误分开。** 端点超时、限流、5xx 记为 error，不算 failed。每个角色的模型外面包一层 `MeteredModel`，即使子 agent 的端点失败被 dispatch 工具转成了 tool_failed、orchestrator 接着往下跑，也知道这次测量不可信。error 自动重跑一次，通过率不计 error。
+- **被测提示词是输入。** `--prompt orchestrator=path` 替换角色的基础提示词。报告头记录每个角色提示词的 sha256 前 12 位和来源；评测过的版本存进 `evals/prompts/`，随时能重跑。代码里的 orchestrator 提示词必须是其中已记录的某一版，否则测试失败，提醒先存版本、比较过再上线。
+- **重复运行，分出噪声。** `--repeat 3` 每条跑三次，按运行次数算通过率，并列出时过时不过的用例。
+- **报告。** markdown 写分类通过率、judge 均分、不稳定用例，以及每次失败的检查项、看到的事实、每轮每个角色的工具调用序列、orchestrator 发给子 agent 的内容和回复摘录。同时写一份 JSON，`evals/run.py compare a.json b.json` 输出分类变化和翻转的用例。
+- **会中止的错误。** 401、402、403 说明账户被拒（密钥错、余额不足、无权限），之后每个请求都会同样失败。遇到这种错误，整次运行立即停止：不再启动新用例，不写报告，退出码 3。同名报告已存在时默认拒绝覆盖，除非显式传 `--overwrite`。这两条都来自下面的实测事故。
+
+**实测（DeepSeek，被测 deepseek-flash，judge 用 deepseek-v4-pro）。**
+
+1. **第一次跑，先修用例。** 50 条各跑一次，45 条通过。逐条看失败，有两条是用例测错了东西。一条工具调用用例检查「brief 是否从用户给的 URL 抓取」，但 router 把请求判成了 workflow，第一轮还没执行，失败的其实是路由。另一条完成类用例没给读者对象，planner 提问恰恰是它的提示词要求的行为。修正方式：不依赖路由的工具调用用例改为跑完自动批准后，再检查整条用例；缺受众的用例补上受众；路由问题补一条路由用例，单独衡量。只修测量本身，不为了让 agent 通过而放宽期望。
+2. **正式基线。** 当前的 orchestrator 提示词记为 `evals/prompts/orchestrator-v1.md`。51 条各跑 3 次，共 153 次，136 次通过（89%）：路由 93%、工具调用 94%、完成 80%、鲁棒性 86%。7 条用例三次结果不一致；24 次 judge 评分全部通过。这次运行共 2036 次模型请求、940 万输入 token、50 万输出 token，并发 10，耗时 6.4 分钟。
+3. **按角色归因。** 17 次失败的分布：
+   - **planner 8 次。**
+     - 5 次：用户说「先给我看计划」，planner 把审批当成自己的事，要么在 questions 里问「你批准这个计划吗」，要么写出 executor 做不了的「确认大纲」工作项，导致 stage blocked。
+     - 2 次：planner 让一份大纲拆出两篇草稿，但 `write_draft` 只能按整份大纲写。
+     - 1 次：信息齐全仍追问篇幅和语言。
+   - **orchestrator 4 次。**
+     - 3 次：「写一篇关于我们新产品的文章」没有问是哪个产品，直接按字面生成。
+     - 1 次：拒绝把没有产出的 stage 标为 done 时，只解释原因，没有问用户下一步。
+   - **router 3 次。** 「抓 brief 再写大纲」被判成 workflow。
+   - **用例 2 次。** 落地页用例同样缺少受众，基线之后补上了。
+
+   另外，orchestrator 在 `dispatch_executor` 之后经常沿用 dispatch 之前读到的 revision，先撞一次 `revision_conflict`，重读后才写成功，白花一次调用。
+4. **候选提示词 v2**（`evals/prompts/orchestrator-v2.md`）只改基线里出现过的问题：
+   - 请求里没有可抓取的对象时先问，不猜；
+   - 交给 planner 的 goal 只写产出什么（交付物、受众、语气、格式），不写用户想怎么评审；
+   - dispatch 之后第一次写入不带旧的 revision；
+   - 做不到时说明原因并让用户选下一步。
+
+   第二条针对的是 planner 的失败，但 planner 只看得到 payload，「先给我看计划」只可能经由 orchestrator 写的 goal 传过去，所以根子在 orchestrator。router 和 planner 自己的问题不在这次改动范围内，预计仍会失败，留作下一轮。
+5. **中断，对比待补。** 为了在报告里记录 orchestrator 发给子 agent 的内容，用修正后的用例重跑基线时，跑到一半 DeepSeek 账户余额耗尽，返回 HTTP 402。当时的运行器把 402 当成 agent 失败继续跑，通过率掉到 61%。这份结果不可信，已删除；而它用了同一个 label，正式基线的报告文件也被覆盖了，所以上面的数字暂时没有对应的报告文件。上面「会中止的错误」那一条（账户被拒即中止、默认不覆盖）就是为此加的。充值后按下面三步补齐：两份报告放进 `docs/evals/`，v2 胜出才替换代码里的提示词，然后在这里写结论。
+
+```bash
+uv run --env-file .env python evals/run.py --label baseline --out docs/evals --repeat 3 \
+  --prompt orchestrator=evals/prompts/orchestrator-v1.md --judge-model deepseek-v4-pro
+uv run --env-file .env python evals/run.py --label prompt-v2 --out docs/evals --repeat 3 \
+  --prompt orchestrator=evals/prompts/orchestrator-v2.md --judge-model deepseek-v4-pro
+uv run python evals/run.py compare docs/evals/baseline.json docs/evals/prompt-v2.json
+```
+
+**取舍。**
+
+- 结构化断言比让 judge 打分难写，但它不漂移、不花钱，失败时说得出看到了什么。judge 只评沟通质量。
+- judge 和被测模型同属一家，仍可能偏好同类文风。换型号、让 judge 看系统状态、固定 rubric 和锚点，能减轻但消除不了。基线里 24 次评分全部通过，说明这份 rubric 的区分度还不够，下一步要用写坏的回复给 judge 做负例校准。
+- 51 条用例各跑 3 次，总通过率差几个百分点仍可能是噪声，基线里就有 7 条用例三次结果不一致。判断一次改动，主要看哪些用例翻转、哪类失败消失，而不只看总分。
+- 用例在看到基线之后修正过，只修测量问题。但没有留出验证集，候选提示词是看着开发集写的；用例多了以后，应该把开发集和验证集分开。
+- 工具是假的，所以评测只衡量编排：路由、工具调用、状态推进、闸门和提问，不衡量内容本身的质量。
+
+**测试覆盖。** 用例集：40 到 60 条、四类齐全、id 唯一。加载时报错的情况：工具名拼错、角色不持有该工具、未知匹配算子、跨文件重复 id。匹配算子；代码里的 orchestrator 提示词必须是已记录的版本。执行：direct 用例在脚本化 agent 下通过，参数按默认值补全后比较；失败的检查项写出实际看到的事实；编造的 id 被抓到，用户给的 id 豁免；自动批准把工作流推进到 done；某一轮崩溃算失败，且不再发送后续轮次。错误分类：端点故障算 error 并重跑一次，包括子 agent 内部被 dispatch 工具吞掉的故障；账户被拒（402）时立即中止、不写报告、不再启动新用例，orchestrator 和子 agent 两种情况都测。judge：只在结构化断言通过后运行，按固定阈值判定，看得到系统状态；不交分算 error。报告：分类表、失败详情和发给子 agent 的内容；compare 的分类变化和翻转用例。CLI：离线运行，提示词替换生效并记录指纹，未知用例 id 报错，同名报告默认拒绝覆盖。

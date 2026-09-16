@@ -27,10 +27,10 @@ and if it still fails explain the problem to the user instead of guessing.
 When the requested work is done, reply with a short summary that names the final id."""
 
 
-def build_openai_model(config: ModelConfig | None = None) -> Model:
+def build_openai_model(config: ModelConfig | None = None, *, max_retries: int = 2) -> Model:
     """A Chat Completions model against whatever endpoint the environment names."""
     config = config or ModelConfig.from_env()
-    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key)
+    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key, max_retries=max_retries)
     return OpenAIChatCompletionsModel(model=config.model, openai_client=client)
 
 

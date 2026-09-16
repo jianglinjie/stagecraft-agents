@@ -1,0 +1,189 @@
+# Completion: the work ends in the right state with the right artefacts.
+# Workflow cases use the approval loop: a simulated user approves each review until
+# nothing is waiting.
+category: completion
+cases:
+  - id: complete-direct-html
+    description: A direct HTML article ends with an HTML render and the reply names it.
+    judge: true
+    turns:
+      - user: "Turn https://example.com/p/41 into an HTML article."
+        expect:
+          plan: {exists: false}
+          workspace:
+            counts:
+              render: {min: 1}
+            render_formats: [html]
+          output:
+            contains_any: [render_0001]
+
+  - id: complete-direct-formal-pdf
+    description: Tone and format both show up in what was produced.
+    turns:
+      - user: "Make a formal PDF about https://example.com/p/42."
+        expect:
+          workspace:
+            counts:
+              render: {min: 1}
+            draft_tones: [formal]
+            render_formats: [pdf]
+
+  - id: complete-direct-playful-video
+    description: A playful video ends as a playful draft rendered to video.
+    turns:
+      - user: "Make a playful short video about https://example.com/p/43."
+        expect:
+          workspace:
+            counts:
+              render: {min: 1}
+            draft_tones: [playful]
+            render_formats: [video]
+
+  - id: complete-follow-up-reuses-the-draft
+    description: A follow-up render uses the existing draft instead of starting over.
+    turns:
+      - user: "Turn https://example.com/p/44 into an HTML article."
+        expect:
+          workspace:
+            render_formats: [html]
+      - user: "Now render that same draft as a PDF as well."
+        expect:
+          calls:
+            any:
+              excludes: [fetch_brief, write_outline, write_draft]
+              args:
+                - tool: render_output
+                  match: {format: pdf, draft_id: draft_0001}
+    final:
+      workspace:
+        counts:
+          draft: {max: 1}
+          render: {min: 2}
+
+  - id: complete-workflow-two-part-series
+    description: A reviewed two-part series ends with every stage done and two drafts.
+    judge: true
+    turns:
+      - user: >-
+          Write a two-part series about https://example.com/p/45 for developers, playful tone,
+          published as HTML. Show me the plan before you start.
+        expect:
+          plan:
+            any_in: [waiting_user]
+            none_in: [doing, done]
+    approve:
+      max_turns: 6
+    final:
+      plan:
+        all_in: [done]
+      workspace:
+        counts:
+          draft: {min: 2}
+          render: {min: 1}
+        render_formats: [html]
+
+  - id: complete-workflow-three-formats
+    description: Three formats from three drafts all get produced.
+    turns:
+      - user: >-
+          For https://example.com/p/46, produce an HTML article, a PDF datasheet and a short
+          video for prospective buyers, each from its own draft. Neutral tone. Let me review the
+          plan first.
+    approve:
+      max_turns: 8
+    final:
+      plan:
+        all_in: [done]
+      workspace:
+        counts:
+          draft: {min: 3}
+          render: {min: 3}
+
+  - id: complete-workflow-answers-then-done
+    description: A series that starts vague gets its answers in turn two and then completes.
+    turns:
+      - user: "Plan a content series about https://example.com/p/47."
+        expect:
+          plan:
+            none_in: [doing, done]
+          workspace:
+            counts:
+              draft: {max: 0}
+              render: {max: 0}
+      - user: >-
+          Audience: developers. Tone: playful. Two articles, each rendered as HTML. Please show
+          me the plan.
+        expect:
+          plan:
+            stages: {min: 1}
+            any_in: [waiting_user]
+            none_in: [doing, done]
+    approve:
+      max_turns: 6
+    final:
+      plan:
+        all_in: [done]
+      workspace:
+        counts:
+          draft: {min: 2}
+        render_formats: [html]
+
+  - id: complete-workflow-format-change-at-review
+    description: A change requested during plan review is replanned, then produced that way.
+    turns:
+      - user: >-
+          Write a two-part series about https://example.com/p/48 for managers, formal tone, as
+          HTML. Show me the plan first.
+      - user: >-
+          Change of plan: render everything as PDF instead of HTML. Show me the updated plan
+          before starting.
+        expect:
+          calls:
+            orchestrator: {includes: [dispatch_planner]}
+          plan:
+            none_in: [doing, done]
+    approve:
+      max_turns: 6
+    final:
+      plan:
+        all_in: [done]
+      workspace:
+        counts:
+          render: {min: 1}
+        render_formats: [pdf]
+
+  - id: complete-workflow-single-reviewed-page
+    description: One page with a plan review first still completes through the workflow.
+    turns:
+      - user: >-
+          Plan and produce one HTML landing page for https://example.com/p/49, for small-business
+          owners, in a friendly tone. I want to approve the plan before any work starts.
+        expect:
+          plan: {exists: true}
+          calls:
+            orchestrator: {excludes: [dispatch_executor]}
+    approve:
+      max_turns: 4
+    final:
+      plan:
+        all_in: [done]
+      workspace:
+        counts:
+          render: {min: 1}
+        render_formats: [html]
+
+  - id: complete-workflow-chinese-series
+    description: A series requested and approved in Chinese completes.
+    judge: true
+    turns:
+      - user: "围绕 https://example.com/p/50 写两篇面向开发者的文章，语气轻松，输出 HTML。开始之前先给我看计划。"
+    approve:
+      message: "同意，继续。"
+      max_turns: 6
+    final:
+      plan:
+        all_in: [done]
+      workspace:
+        counts:
+          draft: {min: 2}
+        render_formats: [html]

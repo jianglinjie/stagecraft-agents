@@ -50,7 +50,7 @@ SUBMIT_TOOL = "submit_execution"
 def build_executor(runtime: AgentRuntime) -> Agent:
     return Agent(
         name="executor",
-        instructions=EXECUTOR_INSTRUCTIONS,
+        instructions=runtime.instructions_for("executor", EXECUTOR_INSTRUCTIONS),
         model=runtime.model("executor"),
         tools=runtime.tools("executor"),
         tool_use_behavior=stop_on_submit(SUBMIT_TOOL),

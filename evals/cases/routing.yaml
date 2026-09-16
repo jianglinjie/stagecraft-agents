@@ -1,0 +1,140 @@
+# Routing: does the router pick direct or workflow, and does the orchestrator follow it?
+# Direct: one piece in one pass. Workflow: several dependent deliverables, a review in
+# between, or too large for one pass.
+category: routing
+cases:
+  - id: routing-direct-html-article
+    description: One short article in one format is a single pass.
+    turns:
+      - user: "Turn https://example.com/p/1 into a short HTML article."
+        expect:
+          route: direct
+          plan: {exists: false}
+
+  - id: routing-direct-pdf-one-pager
+    description: A one-page PDF is one deliverable with no review.
+    turns:
+      - user: "Make a one-page PDF about the product at https://example.com/p/2."
+        expect:
+          route: direct
+          plan: {exists: false}
+
+  - id: routing-direct-outline-only
+    description: An outline on its own is direct work.
+    turns:
+      - user: "I only need an outline for a blog post about https://example.com/p/3."
+        expect:
+          route: direct
+          plan: {exists: false}
+
+  - id: routing-direct-draft-no-render
+    description: A single draft, explicitly not rendered, is direct work.
+    turns:
+      - user: "Write a playful draft about https://example.com/p/4. No rendering needed."
+        expect:
+          route: direct
+          plan: {exists: false}
+
+  - id: routing-direct-short-video
+    description: One short video from one draft is direct work.
+    turns:
+      - user: "Render a short video from a draft about https://example.com/p/5."
+        expect:
+          route: direct
+          plan: {exists: false}
+
+  - id: routing-direct-brief-summary
+    description: Fetching and summarising a brief needs no plan.
+    turns:
+      - user: "Fetch the brief for https://example.com/p/6 and tell me what it covers."
+        expect:
+          route: direct
+          plan: {exists: false}
+
+  - id: routing-direct-brief-then-outline
+    description: A brief and the outline built from it are still one pass.
+    turns:
+      - user: "Get the brief for https://example.com/p/15 and write an outline from it."
+        expect:
+          route: direct
+          plan: {exists: false}
+
+  - id: routing-direct-chinese-request
+    description: A direct request written in Chinese routes the same way.
+    turns:
+      - user: "把 https://example.com/p/7 做成一篇简短的 HTML 文章。"
+        expect:
+          route: direct
+          plan: {exists: false}
+
+  - id: routing-workflow-three-part-series
+    description: A three-part series has dependent deliverables and gets a plan.
+    judge: true
+    turns:
+      - user: "Write a three-part blog series about https://example.com/p/8."
+        expect:
+          route: workflow
+          plan: {exists: true}
+          calls:
+            orchestrator: {excludes: [dispatch_executor]}
+
+  - id: routing-workflow-review-before-draft
+    description: A review of an intermediate result before continuing makes it a workflow.
+    judge: true
+    turns:
+      - user: >-
+          Draft an article about https://example.com/p/9, but I want to approve the outline
+          before you write the draft.
+        expect:
+          route: workflow
+          plan: {exists: true}
+          calls:
+            orchestrator: {excludes: [dispatch_executor]}
+
+  - id: routing-workflow-formats-from-separate-drafts
+    description: Several formats built from different drafts need a plan.
+    turns:
+      - user: >-
+          Produce an HTML article and a separate video script, each from its own draft, about
+          https://example.com/p/10.
+        expect:
+          route: workflow
+          plan: {exists: true}
+
+  - id: routing-workflow-launch-campaign
+    description: A campaign of three deliverables is a workflow.
+    turns:
+      - user: >-
+          Plan a launch campaign for https://example.com/p/11: a blog post, a PDF datasheet and
+          a short video.
+        expect:
+          route: workflow
+          plan: {exists: true}
+
+  - id: routing-workflow-several-articles
+    description: Several separate articles are too large for one pass.
+    turns:
+      - user: "Write four separate articles, one per feature of https://example.com/p/12."
+        expect:
+          route: workflow
+          plan: {exists: true}
+
+  - id: routing-workflow-chinese-series
+    description: A series requested in Chinese, with a plan review, routes to workflow.
+    turns:
+      - user: "围绕 https://example.com/p/13 写一个两篇的系列文章，先给我看计划。"
+        expect:
+          route: workflow
+          plan: {exists: true}
+
+  - id: routing-workflow-check-after-each-stage
+    description: Asking to be checked with after each stage is a workflow.
+    turns:
+      - user: >-
+          Create a long-form guide for https://example.com/p/14 in stages, and check with me
+          after each stage.
+        expect:
+          route: workflow
+          plan: {exists: true}
+          calls:
+            orchestrator: {excludes: [dispatch_executor]}

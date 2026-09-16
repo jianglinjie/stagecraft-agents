@@ -1,0 +1,187 @@
+# Tool calls: the right tools, with the right arguments, and nothing that was not asked for.
+# Where the property does not depend on the route, the case runs the approval loop and checks
+# the whole case, so a routing mistake is measured once, in routing.yaml, not twice.
+category: tool_calls
+cases:
+  - id: tools-brief-uses-the-given-url
+    description: The brief is fetched from the URL the user gave, whichever route runs it.
+    turns:
+      - user: "Get the brief for https://example.com/p/21 and write an outline from it."
+    approve:
+      max_turns: 4
+    final:
+      calls:
+        any:
+          includes: [write_outline]
+          args:
+            - tool: fetch_brief
+              match: {source: {contains: "example.com/p/21"}}
+
+  - id: tools-outline-exact-section-count
+    description: A requested section count reaches write_outline, and nothing past it runs.
+    turns:
+      - user: "Outline https://example.com/p/22 in exactly 5 sections. I only need the outline."
+    approve:
+      max_turns: 4
+    final:
+      calls:
+        any:
+          excludes: [write_draft, render_output]
+          args:
+            - tool: write_outline
+              match: {sections: 5}
+              every: true
+
+  - id: tools-formal-draft-without-render
+    description: The tone reaches write_draft and the draft is not rendered.
+    turns:
+      - user: "Write a formal draft about https://example.com/p/23. Don't render it."
+    approve:
+      max_turns: 4
+    final:
+      calls:
+        any:
+          excludes: [render_output]
+          args:
+            - tool: write_draft
+              match: {tone: formal}
+              every: true
+
+  - id: tools-render-as-pdf
+    description: The requested format reaches render_output.
+    turns:
+      - user: "Turn https://example.com/p/24 into a PDF."
+    approve:
+      max_turns: 4
+    final:
+      calls:
+        any:
+          args:
+            - tool: render_output
+              match: {format: pdf}
+              every: true
+
+  - id: tools-render-as-video
+    description: A video request renders as video.
+    turns:
+      - user: "Make a short video from https://example.com/p/25."
+    approve:
+      max_turns: 4
+    final:
+      calls:
+        any:
+          args:
+            - tool: render_output
+              match: {format: video}
+              every: true
+
+  - id: tools-tone-and-format-together
+    description: Tone and format from one sentence both reach their tools.
+    turns:
+      - user: "Write a playful HTML article about https://example.com/p/26."
+    approve:
+      max_turns: 4
+    final:
+      calls:
+        any:
+          args:
+            - tool: write_draft
+              match: {tone: playful}
+              every: true
+            - tool: render_output
+              match: {format: html}
+              every: true
+
+  - id: tools-brief-only
+    description: When only the brief is wanted, no later tool runs.
+    turns:
+      - user: "Only fetch the brief for https://example.com/p/27 and summarise it. Nothing else."
+    approve:
+      max_turns: 4
+    final:
+      calls:
+        any:
+          includes: [fetch_brief]
+          excludes: [write_outline, write_draft, render_output]
+
+  - id: tools-router-before-content-tools
+    description: A new request goes to the router before any content tool, on either route.
+    turns:
+      - user: "Write a short HTML article about https://example.com/p/28."
+    approve:
+      max_turns: 4
+    final:
+      calls:
+        any:
+          ordered: [dispatch_router, fetch_brief]
+
+  - id: tools-plan-review-sequence
+    description: >-
+      A reviewed series creates one plan, authors it, and requests plan review without
+      confirming anything.
+    turns:
+      - user: >-
+          Write a two-part series about https://example.com/p/29 for developers, playful tone,
+          as HTML. Show me the plan first.
+        expect:
+          calls:
+            orchestrator:
+              ordered: [dispatch_router, plan_create, dispatch_planner, plan_update_stage_state]
+              excludes: [dispatch_executor]
+              counts:
+                plan_create: {max: 1}
+              args:
+                - tool: plan_update_stage_state
+                  match: {target: waiting_user, review_kind: plan_review}
+                - tool: plan_update_stage_state
+                  match: {user_confirmed: false}
+                  every: true
+
+  - id: tools-planner-links-stages
+    description: The planner authors each stage separately and names upstream stages as inputs.
+    turns:
+      - user: >-
+          Write a three-part tutorial series about https://example.com/p/30 for beginners,
+          neutral tone, as HTML. Plan it for my review.
+        expect:
+          calls:
+            planner:
+              includes: [plan_write_stage_contract, submit_plan]
+          plan:
+            stages: {min: 2}
+            upstream_inputs: true
+
+  - id: tools-executor-builds-on-upstream-ids
+    description: >-
+      A later stage builds on the ids an earlier stage produced instead of fetching or
+      outlining again.
+    turns:
+      - user: >-
+          Two stages for https://example.com/p/31, for managers: first the brief and an outline,
+          then a formal draft rendered as PDF. Show me the plan.
+    approve:
+      max_turns: 4
+    final:
+      calls:
+        executor:
+          includes: [plan_get_stage_detail, plan_attach_runtime]
+      plan:
+        all_in: [done]
+      workspace:
+        counts:
+          brief: {max: 1}
+          outline: {max: 1}
+        render_formats: [pdf]
+
+  - id: tools-direct-reply-names-final-id
+    description: The finished result is reported by the id of the final artefact.
+    turns:
+      - user: "Turn https://example.com/p/32 into an HTML article and tell me the id of the result."
+    approve:
+      max_turns: 4
+    final:
+      workspace:
+        counts:
+          render: {min: 1}
+      output:
+        contains_any: [render_0001]

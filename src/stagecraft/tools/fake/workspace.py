@@ -28,6 +28,10 @@ class FakeWorkspace:
             raise LookupError(f"no {kind} with id {record_id!r}")
         return record
 
+    def snapshot(self) -> dict[str, dict[str, Any]]:
+        """A copy of every record, for asserting on what a run produced."""
+        return {rid: dict(rec) for rid, rec in self._records.items()}
+
     def ids(self, kind: str | None = None) -> list[str]:
         return [rid for rid, rec in self._records.items() if kind is None or rec["kind"] == kind]
 

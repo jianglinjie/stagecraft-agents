@@ -52,6 +52,7 @@ class AgentRuntime:
     topic: str | None = None
     memory_threshold_tokens: int = 8000
     extra_role_tools: dict[Role, tuple[str, ...]] = field(default_factory=dict)
+    instructions: dict[Role, str] = field(default_factory=dict)
     extras: dict[str, Any] = field(default_factory=dict)
     _memories: dict[str, SessionMemory] = field(default_factory=dict, repr=False)
 
@@ -79,6 +80,10 @@ class AgentRuntime:
             long_term=self.long_term,
             topic=self.topic,
         )
+
+    def instructions_for(self, role: Role, default: str) -> str:
+        """``role``'s base prompt: the override an eval run passed in, else ``default``."""
+        return self.instructions.get(role, default)
 
     def model(self, role: Role) -> Model:
         try:
@@ -139,11 +144,13 @@ def build_runtime(
     memory_threshold_tokens: int = 8000,
     extra_tools: Sequence[ToolSpec] = (),
     extra_role_tools: Mapping[Role, Sequence[str]] | None = None,
+    instructions: Mapping[Role, str] | None = None,
 ) -> AgentRuntime:
     """Assemble one chat's runtime.
 
     ``extra_tools`` are registered like any other tool (for example an MCP server's admitted
-    tools); ``extra_role_tools`` decides which roles may pick them.
+    tools); ``extra_role_tools`` decides which roles may pick them. ``instructions`` replaces a
+    role's base prompt, so an eval can compare prompts without editing code.
     """
     from stagecraft.agents.dispatch import build_dispatch_tools, build_submit_tools
 
@@ -174,6 +181,7 @@ def build_runtime(
         topic=topic,
         memory_threshold_tokens=memory_threshold_tokens,
         extra_role_tools={role: tuple(names) for role, names in (extra_role_tools or {}).items()},
+        instructions=dict(instructions or {}),
     )
     for spec in [*build_submit_tools(), *build_dispatch_tools(runtime)]:
         registry.register(spec)

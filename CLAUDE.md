@@ -20,8 +20,11 @@ The mechanisms being reproduced, one per milestone:
 4. Memory + assets — persisted session memory with compaction; asset pool with source
    dedup, archive-as-record, single rejection path.
 5. MCP server/client + a LangGraph rewrite of the same topology with a comparison doc.
+6. An eval set — YAML cases, structured checks on the Plan Store / workspace / tool calls, a
+   fixed-rubric LLM judge, markdown reports, and a measured orchestrator prompt change.
 
-All five milestones are implemented; README.md has a section per milestone.
+All six milestones are implemented; README.md has a section per milestone. Milestone 6's
+before/after prompt comparison still has to be rerun (the endpoint account ran out mid-run).
 
 ## Commands
 
@@ -32,6 +35,8 @@ uv run ruff format .    # format
 uv run pytest           # tests (tests/ only)
 uv run --env-file .env python -m stagecraft.api   # HTTP + SSE on :8000
 uv run --env-file .env python -m stagecraft.mcp   # MCP server on stdio
+uv run --env-file .env python evals/run.py        # live eval run -> .data/evals/<label>.md
+uv run python evals/run.py compare a.json b.json  # category deltas and flipped cases
 ```
 
 Lint and tests must be green before every commit.
@@ -66,8 +71,11 @@ src/stagecraft/
               __main__.py (stdio entry point; logs to stderr only)
   graph/      the same flow on LangGraph: workflow.py (StateGraph, interrupt, checkpointer),
               agents.py (GraphDeps and the node-level agents)
+  evals/      cases.py (YAML -> validated cases), trace.py (CaseSession, MeteredModel),
+              checks.py (structured checks), judge.py (fixed rubric), runner.py, report.py, cli.py
+evals/        run.py (entry point), cases/*.yaml (the eval set), prompts/ (prompts under test)
 tests/        all tests; pytest runs nothing outside this directory
-docs/         framework-comparison.md
+docs/         framework-comparison.md; evals/ (committed eval reports and their JSON results)
 ```
 
 ## Conventions
@@ -107,6 +115,15 @@ docs/         framework-comparison.md
 - In the LangGraph version, code before `interrupt()` re-runs on resume: keep it idempotent,
   and commit state changes in an earlier node when they must be visible while waiting.
 - Durable state lives in the Plan Store and the session tables, not in the transcript.
+- Eval cases are data in `evals/cases/*.yaml`. Checks read facts (Plan Store, workspace, recorded
+  tool calls with defaults applied); only `output` checks read reply text. Tool names in a case
+  are validated at load, so a typo cannot turn an `excludes` check into a permanent pass.
+- A prompt change is measured, not eyeballed: save each version under test in `evals/prompts/`,
+  run old and new with `--repeat`, commit both reports to `docs/evals/`, and ship the new one
+  only if it wins. The shipped orchestrator prompt must be one of the recorded files (a test
+  enforces it).
+- Endpoint failures (timeouts, rate limits, 5xx) are `error`, never `failed`, and are retried
+  once. Tests never run live evals: `tests/test_evals.py` drives the framework with FakeModel.
 - One milestone = one commit, plus a README section explaining the problem, the design and
   the trade-offs in a form that can be spoken in two minutes.
 - Commit messages: conventional prefix (`feat:`, `chore:`, `docs:`, `test:`), no AI tool
