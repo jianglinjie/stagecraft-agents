@@ -67,6 +67,10 @@ class StageContract(BaseModel):
     work_items: list[WorkItem] = Field(default_factory=list)
     acceptance: str = ""
     sources: list[str] = Field(default_factory=list)
+    assets: list[str] = Field(
+        default_factory=list,
+        description="Names of session assets this stage uses. Archiving one reports this stage.",
+    )
 
 
 class StageRuntime(BaseModel):

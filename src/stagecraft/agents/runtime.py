@@ -12,12 +12,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agents import Agent, FunctionTool, Model, RunConfig, Runner, RunResult, SQLiteSession
-from agents.memory import Session
+from agents import Agent, FunctionTool, Model, RunConfig, Runner, RunResult
 from pydantic import BaseModel
 
 from stagecraft.agents.roles import ROLE_TOOLS
+from stagecraft.assets import AssetStore, TurnAssetChanges
+from stagecraft.db import Database
+from stagecraft.memory import (
+    Compactor,
+    LongTermMemory,
+    SessionMemory,
+    TurnContext,
+    build_turn_context,
+)
 from stagecraft.plan import PlanStore
+from stagecraft.tools.assets import build_asset_tools
 from stagecraft.tools.context import Role, RunContext
 from stagecraft.tools.fake import FakeWorkspace, build_fake_tools
 from stagecraft.tools.plan import build_plan_tools
@@ -36,20 +45,39 @@ class AgentRuntime:
     max_turns: int = 20
     tracing: bool = False
     on_sub_run: SubRunHook | None = None
-    session_db: Path | None = None
+    assets: AssetStore | None = None
+    memory_db: Database = field(default_factory=Database)
+    compactor: Compactor | None = None
+    long_term: LongTermMemory | None = None
+    topic: str | None = None
+    memory_threshold_tokens: int = 8000
     extras: dict[str, Any] = field(default_factory=dict)
-    _sessions: dict[str, Session] = field(default_factory=dict, repr=False)
+    _memories: dict[str, SessionMemory] = field(default_factory=dict, repr=False)
 
-    def session(self, key: str) -> Session:
-        """Conversation memory for ``key``: the chat for the orchestrator, a task for the planner.
+    def memory(self, key: str, role: Role) -> SessionMemory:
+        """Session memory for ``key``: the chat for the orchestrator, a task for the planner.
 
-        Backed by a file when ``session_db`` is set, so it survives a restart. In memory
-        otherwise; the instance is cached so a second run with the same key continues.
+        Reads are repaired against ``role``'s current tool names, so history written by an
+        older version of the agent cannot break the next run.
         """
-        if key not in self._sessions:
-            db = self.session_db if self.session_db is not None else ":memory:"
-            self._sessions[key] = SQLiteSession(key, db)
-        return self._sessions[key]
+        if key not in self._memories:
+            self._memories[key] = SessionMemory(
+                key,
+                self.memory_db,
+                known_tools=ROLE_TOOLS[role],
+                threshold_tokens=self.memory_threshold_tokens,
+            )
+        return self._memories[key]
+
+    def turn_context(self, changes: TurnAssetChanges | None = None) -> TurnContext:
+        return build_turn_context(
+            chat_id=self.chat_id,
+            plans=self.store,
+            assets=self.assets,
+            changes=changes,
+            long_term=self.long_term,
+            topic=self.topic,
+        )
 
     def model(self, role: Role) -> Model:
         try:
@@ -99,12 +127,27 @@ def build_runtime(
     workspace: FakeWorkspace | None = None,
     max_turns: int = 20,
     session_db: Path | None = None,
+    memory_db: Database | None = None,
+    assets: AssetStore | None = None,
+    compactor: Compactor | None = None,
+    long_term: LongTermMemory | None = None,
+    topic: str | None = None,
+    memory_threshold_tokens: int = 8000,
 ) -> AgentRuntime:
     from stagecraft.agents.dispatch import build_dispatch_tools, build_submit_tools
 
     store = PlanStore() if store is None else store
     workspace = FakeWorkspace() if workspace is None else workspace
-    registry = ToolRegistry([*build_fake_tools(workspace), *build_plan_tools(store)])
+    assets = AssetStore(plans=store) if assets is None else assets
+    if memory_db is None:
+        memory_db = Database(session_db if session_db is not None else ":memory:")
+    registry = ToolRegistry(
+        [
+            *build_fake_tools(workspace, assets),
+            *build_plan_tools(store),
+            *build_asset_tools(assets),
+        ]
+    )
     runtime = AgentRuntime(
         chat_id=chat_id,
         store=store,
@@ -112,7 +155,12 @@ def build_runtime(
         registry=registry,
         models=models,
         max_turns=max_turns,
-        session_db=session_db,
+        assets=assets,
+        memory_db=memory_db,
+        compactor=compactor,
+        long_term=long_term,
+        topic=topic,
+        memory_threshold_tokens=memory_threshold_tokens,
     )
     for spec in [*build_submit_tools(), *build_dispatch_tools(runtime)]:
         registry.register(spec)

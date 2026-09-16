@@ -18,6 +18,9 @@ ROLE_TOOLS: dict[Role, tuple[str, ...]] = {
         "plan_create",
         "plan_get_stage_detail",
         "plan_update_stage_state",
+        "asset_list",
+        "asset_get",
+        "archive_session_assets",
         *CONTENT_TOOLS,
     ),
     "router": ("submit_route",),
@@ -25,6 +28,7 @@ ROLE_TOOLS: dict[Role, tuple[str, ...]] = {
     "executor": (
         "plan_get_stage_detail",
         "plan_attach_runtime",
+        "asset_get",
         *CONTENT_TOOLS,
         "submit_execution",
     ),

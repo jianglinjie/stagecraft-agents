@@ -8,13 +8,17 @@ workspace, and an explicit hint about what to do next.
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import Field
 
+from stagecraft.tools.context import RunContext
 from stagecraft.tools.fake.workspace import FakeWorkspace
 from stagecraft.tools.registry import ToolRegistry, ToolSpec, tool
-from stagecraft.tools.results import ToolResult
+from stagecraft.tools.results import StructuredToolError, ToolResult
+
+if TYPE_CHECKING:
+    from stagecraft.assets import AssetStore
 
 Tone = Literal["neutral", "playful", "formal"]
 OutputFormat = Literal["html", "pdf", "video"]
@@ -39,6 +43,7 @@ class DraftResult(ToolResult):
     draft_id: str
     outline_id: str
     word_count: int
+    reference_assets: list[str] = []
     summary: str
     next_step: str
 
@@ -52,8 +57,8 @@ class RenderResult(ToolResult):
     next_step: str | None = None
 
 
-def build_fake_tools(workspace: FakeWorkspace) -> list[ToolSpec]:
-    """The four tools, bound to one workspace."""
+def build_fake_tools(workspace: FakeWorkspace, assets: AssetStore | None = None) -> list[ToolSpec]:
+    """The four tools, bound to one workspace and, optionally, the session asset pool."""
 
     @tool
     def fetch_brief(
@@ -92,17 +97,32 @@ def build_fake_tools(workspace: FakeWorkspace) -> list[ToolSpec]:
 
     @tool
     def write_draft(
+        ctx: RunContext | None,
         outline_id: Annotated[str, "Id returned by write_outline."],
         tone: Annotated[Tone, "Voice of the draft."] = "neutral",
+        reference_assets: Annotated[
+            list[str], "Names of active session assets to draw on (images, notes, briefs)."
+        ] = [],  # noqa: B006
     ) -> DraftResult:
         """Write a full draft that follows a stored outline."""
         outline = workspace.require(outline_id, "outline")
+        used: list[str] = []
+        if reference_assets:
+            if assets is None or ctx is None:
+                raise StructuredToolError(
+                    "asset references are not available in this context",
+                    hint="Call write_draft without reference_assets.",
+                )
+            used = [a.name for a in assets.resolve_many(ctx.chat_id, reference_assets)]
         body = "\n\n".join(f"{h}\n" + " ".join(["lorem"] * 60) for h in outline["headings"])
-        draft_id = workspace.put("draft", {"outline_id": outline_id, "tone": tone, "body": body})
+        draft_id = workspace.put(
+            "draft", {"outline_id": outline_id, "tone": tone, "body": body, "assets": used}
+        )
         return DraftResult(
             draft_id=draft_id,
             outline_id=outline_id,
             word_count=len(body.split()),
+            reference_assets=used,
             summary=f"{tone} draft with {len(outline['headings'])} sections.",
             next_step="Call render_output with this draft_id, or revise the outline.",
         )

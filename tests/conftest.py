@@ -15,7 +15,11 @@ from typing import Any
 
 import httpx
 import uvicorn
+from agents import set_tracing_disabled
 from fastapi import FastAPI
+
+# Tests never export traces: there is no key, and nothing should leave the machine.
+set_tracing_disabled(True)
 
 
 @contextmanager

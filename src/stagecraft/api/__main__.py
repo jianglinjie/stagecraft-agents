@@ -12,6 +12,7 @@ from stagecraft.agents.runtime import same_model_for_all_roles
 from stagecraft.agents.single import build_openai_model
 from stagecraft.api.app import build_services, create_app
 from stagecraft.config import MissingConfigError
+from stagecraft.memory import ModelCompactor, ModelRewriter
 
 
 def main() -> int:
@@ -23,6 +24,8 @@ def main() -> int:
     services = build_services(
         models_for=lambda _session_id: same_model_for_all_roles(model),
         data_dir=Path(os.environ.get("STAGECRAFT_DATA_DIR", ".data")),
+        compactor=ModelCompactor(model),
+        rewriter=ModelRewriter(model),
     )
     uvicorn.run(
         create_app(services),

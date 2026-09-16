@@ -34,6 +34,9 @@ ToolErrorCode = Literal[
     "confirmation_required",
     "contract_required",
     "results_required",
+    # raised by the asset pool
+    "asset_archived",
+    "assets_in_use",
 ]
 
 

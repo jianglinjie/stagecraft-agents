@@ -20,7 +20,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,6 +36,7 @@ from stagecraft.api.sessions import (
     SessionStore,
     TurnRecord,
 )
+from stagecraft.assets import ArchiveReason, AssetError, AssetStore, NewAsset, TurnAssetChanges
 from stagecraft.plan import PlanStore
 
 log = logging.getLogger(__name__)
@@ -49,6 +50,14 @@ class SessionNotFound(Exception):
 
 class TurnConflict(Exception):
     """A turn is already running for this session."""
+
+
+class InvalidTurnInput(Exception):
+    """The message's asset changes were refused; nothing was stored."""
+
+    def __init__(self, error: AssetError) -> None:
+        super().__init__(str(error))
+        self.error = error
 
 
 @dataclass(frozen=True)
@@ -75,6 +84,7 @@ class TurnService:
         sessions: SessionStore,
         leases: LeaseStore,
         plans: PlanStore,
+        assets: AssetStore,
         bus: EventBus,
         runtime_for: Callable[[str], AgentRuntime],
         lease_ttl: float = 60.0,
@@ -83,6 +93,8 @@ class TurnService:
         self.sessions = sessions
         self.leases = leases
         self.plans = plans
+        self.assets = assets
+        self._changes: dict[str, TurnAssetChanges] = {}
         self.bus = bus
         self.runtime_for = runtime_for
         self.lease_ttl = lease_ttl
@@ -92,7 +104,13 @@ class TurnService:
     # -- request path ------------------------------------------------------------
 
     async def start_turn(
-        self, session_id: str, content: str, client_message_id: str | None = None
+        self,
+        session_id: str,
+        content: str,
+        client_message_id: str | None = None,
+        *,
+        attachments: Sequence[NewAsset] = (),
+        archive: Sequence[str] = (),
     ) -> TurnStarted:
         if self.sessions.get_session(session_id) is None:
             raise SessionNotFound(session_id)
@@ -114,15 +132,28 @@ class TurnService:
             raise TurnConflict(session_id) from None
 
         try:
-            message, turn = self.sessions.record_user_message(
-                session_id, content, client_message_id
-            )
+            # The message, its turn, this turn's uploads and archives: one transaction.
+            with self.sessions.db.transaction():
+                message, turn = self.sessions.record_user_message(
+                    session_id, content, client_message_id
+                )
+                changes = self.assets.apply_turn_changes(
+                    session_id,
+                    message_id=message.id,
+                    register=attachments,
+                    archive=archive,
+                    archive_reason=ArchiveReason.PANEL,
+                )
         except DuplicateClientMessage as dup:
             self.leases.release(lease)
             return _duplicate(dup.existing)
+        except AssetError as err:
+            self.leases.release(lease)
+            raise InvalidTurnInput(err) from None
         except BaseException:
             self.leases.release(lease)
             raise
+        self._changes[turn.id] = changes
 
         task = asyncio.create_task(self._run(message, turn, lease), name=f"turn:{turn.id}")
         self._tasks[turn.id] = task
@@ -157,8 +188,12 @@ class TurnService:
         self._publish_state(session_id, running=True)
         try:
             runtime = self.runtime_for(session_id)
-            streamed = stream_orchestrator_turn(
-                runtime, message.content, turn_id=turn.id, message_id=message.id
+            streamed = await stream_orchestrator_turn(
+                runtime,
+                message.content,
+                changes=self._changes.pop(turn.id, None),
+                turn_id=turn.id,
+                message_id=message.id,
             )
             async for event in streamed.stream_events():
                 self._translate(session_id, state, event)

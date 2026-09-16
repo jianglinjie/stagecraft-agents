@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from stagecraft.agents.runtime import AgentRuntime, build_runtime, same_model_for_all_roles
 from stagecraft.agents.single import build_openai_model, format_trace
+from stagecraft.assets import TurnAssetChanges
 from stagecraft.config import MissingConfigError
 from stagecraft.tools.context import Role
 
@@ -54,7 +55,12 @@ Rules:
 - The Plan Store is the truth. Follow next_action from tool results; never infer progress from
   the conversation.
 - Never invent ids. Never copy contracts, briefs or history into a dispatch payload.
-- On an error result, read its code and hint before doing anything else."""
+- On an error result, read its code and hint before doing anything else.
+- Assets: refer to them by name. Archive only when the user explicitly asks in chat, or when an
+  output you just made replaces an earlier version. Archiving is final. If archive_session_assets
+  reports stages still using an asset, name those stages to the user and replan or get their
+  confirmation before calling again with force=true. When the Turn Context says the user archived
+  an asset that a stage relies on, say so and agree on a replacement before continuing."""
 
 
 def stop_on_interrupt(
@@ -77,10 +83,15 @@ def stop_on_interrupt(
     return ToolsToFinalOutputResult(is_final_output=False, final_output=None)
 
 
-def build_orchestrator(runtime: AgentRuntime) -> Agent:
+def build_orchestrator(runtime: AgentRuntime, changes: TurnAssetChanges | None = None) -> Agent:
+    def instructions(_ctx: RunContextWrapper[Any], _agent: Agent) -> str:
+        # Rebuilt on every model call, so the plan summary is current mid-turn, and never
+        # written to session memory, because the SDK does not store instructions.
+        return ORCHESTRATOR_INSTRUCTIONS + "\n\n" + runtime.turn_context(changes).render()
+
     return Agent(
         name="orchestrator",
-        instructions=ORCHESTRATOR_INSTRUCTIONS,
+        instructions=instructions,
         model=runtime.model("orchestrator"),
         tools=runtime.tools("orchestrator"),
         tool_use_behavior=stop_on_interrupt,
@@ -96,31 +107,41 @@ async def run_orchestrator_turn(
     user_input: str | list[TResponseInputItem],
     *,
     remember: bool = False,
+    changes: TurnAssetChanges | None = None,
     **context_kwargs: str,
 ) -> RunResult:
-    """One user turn. With ``remember`` the chat's session supplies and keeps the history."""
-    session = runtime.session(chat_session_key(runtime.chat_id)) if remember else None
+    """One user turn. With ``remember`` the chat's session memory supplies and keeps history."""
+    memory = None
+    if remember:
+        memory = runtime.memory(chat_session_key(runtime.chat_id), "orchestrator")
+        await memory.maybe_compact(runtime.compactor)
     return await Runner.run(
-        build_orchestrator(runtime),
+        build_orchestrator(runtime, changes),
         user_input,
         context=runtime.context("orchestrator", **context_kwargs),
         max_turns=runtime.max_turns,
         run_config=runtime.run_config(),
-        session=session,
+        session=memory,
     )
 
 
-def stream_orchestrator_turn(
-    runtime: AgentRuntime, user_input: str, **context_kwargs: str
+async def stream_orchestrator_turn(
+    runtime: AgentRuntime,
+    user_input: str,
+    *,
+    changes: TurnAssetChanges | None = None,
+    **context_kwargs: str,
 ) -> RunResultStreaming:
-    """The streamed form the HTTP layer uses. History always comes from the chat session."""
+    """The streamed form the HTTP layer uses. History always comes from session memory."""
+    memory = runtime.memory(chat_session_key(runtime.chat_id), "orchestrator")
+    await memory.maybe_compact(runtime.compactor)
     return Runner.run_streamed(
-        build_orchestrator(runtime),
+        build_orchestrator(runtime, changes),
         user_input,
         context=runtime.context("orchestrator", **context_kwargs),
         max_turns=runtime.max_turns,
         run_config=runtime.run_config(),
-        session=runtime.session(chat_session_key(runtime.chat_id)),
+        session=memory,
     )
 
 
@@ -149,7 +170,11 @@ async def _main(argv: Sequence[str]) -> int:
     except MissingConfigError as err:
         print(f"error: {err}", file=sys.stderr)
         return 2
-    runtime = build_runtime(chat_id="cli", models=same_model_for_all_roles(model))
+    from stagecraft.memory import ModelCompactor
+
+    runtime = build_runtime(
+        chat_id="cli", models=same_model_for_all_roles(model), compactor=ModelCompactor(model)
+    )
     runtime.on_sub_run = _print_sub_run
 
     user_input = prompt

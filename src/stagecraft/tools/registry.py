@@ -55,6 +55,7 @@ class ToolSpec:
     result_model: type[ToolResult]
     is_async: bool
     context_param: str | None = None
+    context_optional: bool = False
 
     @classmethod
     def from_function(
@@ -80,10 +81,12 @@ class ToolSpec:
 
         fields: dict[str, Any] = {}
         context_param: str | None = None
+        context_optional = False
         for param in inspect.signature(fn).parameters.values():
-            if hints.get(param.name) is RunContext:
+            if hints.get(param.name) in (RunContext, RunContext | None):
                 # Injected from the run, invisible to the model.
                 context_param = param.name
+                context_optional = hints[param.name] is not RunContext
                 continue
             if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
                 raise ToolDefinitionError(
@@ -110,6 +113,7 @@ class ToolSpec:
             result_model=result_model,
             is_async=inspect.iscoroutinefunction(fn),
             context_param=context_param,
+            context_optional=context_optional,
         )
 
     @property
@@ -147,13 +151,13 @@ class ToolSpec:
 
         kwargs = {field: getattr(params, field) for field in self.params_model.model_fields}
         if self.context_param is not None:
-            if not isinstance(context, RunContext):
+            if not isinstance(context, RunContext) and not self.context_optional:
                 return ToolError(
                     code="tool_failed",
                     message=f"{self.name} was called without a run context",
                     hint="This tool must be run by an agent started with a RunContext.",
                 )
-            kwargs[self.context_param] = context
+            kwargs[self.context_param] = context if isinstance(context, RunContext) else None
         try:
             result = self.fn(**kwargs)
             if inspect.isawaitable(result):

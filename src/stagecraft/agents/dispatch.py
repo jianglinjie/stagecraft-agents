@@ -131,11 +131,10 @@ def build_dispatch_tools(runtime: AgentRuntime) -> list[ToolSpec]:
             store.clear_questions(plan_id=plan_id, role=ctx.role)
         task = task_id or f"{plan_id}:planner"
         payload = PlannerPayload(plan_id=plan_id, goal=goal, stage_id=stage_id, answers=answers)
+        memory = runtime.memory(f"task:{task}", "planner")
+        await memory.maybe_compact(runtime.compactor)
         result = await runtime.run_sub_agent(
-            build_planner(runtime),
-            payload,
-            ctx.as_role("planner"),
-            session=runtime.session(f"task:{task}"),
+            build_planner(runtime), payload, ctx.as_role("planner"), session=memory
         )
         output = read_submission(result, PlannerOutput, role="planner")
 

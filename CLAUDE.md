@@ -48,7 +48,12 @@ src/stagecraft/
   tools/      registry.py (@tool, ToolSpec, ToolRegistry), results.py (ToolResult / ToolError /
               StructuredToolError), context.py (RunContext: the injected caller role),
               fake/ (FakeWorkspace + four content tools), plan/ (five plan tools)
-  memory/     session memory, compaction, long-term memory interface
+  db.py       Database: one connection + lock, nestable transactions (outermost commits)
+  assets/     AssetStore: source identity, archive-as-record (DB triggers forbid restore and
+              delete), resolve() as the one exit for name lookups, apply_turn_changes()
+  memory/     turn_context.py (rebuilt per model call, lives in instructions, never stored),
+              session_memory.py (SDK Session over SQLite, repair on read, maybe_compact),
+              items.py (repair_history, estimate_tokens), compaction.py, long_term.py
   api/        app.py (routes, build_services), turns.py (TurnService: lease -> background run ->
               events), events.py (EventBus: bounded log + broadcast + seq), leases.py (SQLite TTL
               lease), sessions.py (sessions, messages, turns; client_message_id idempotency)
@@ -79,6 +84,13 @@ docs/         design notes and comparisons
 - HTTP tests run a real uvicorn server (`tests/conftest.py`): httpx's ASGI transport buffers
   whole responses and never returns for an event stream.
 - `FakeModel` must stay a plain class: the SDK fingerprints dataclass models with `asdict`.
+- Anything that looks an asset up by name calls `AssetStore.resolve` / `resolve_many`. Never
+  query the assets table directly from a tool.
+- Writes that must land together share a `Database` and nest `with db.transaction():`.
+- Per-turn context belongs in `turn_context.py` (dynamic instructions), not in the user message
+  and not in session memory.
+- Renaming or removing a tool is safe for stored history (repair on read), but keep
+  `ROLE_TOOLS` accurate: repair uses it to decide which calls are retired.
 - Durable state lives in the Plan Store and the session tables, not in the transcript.
 - One milestone = one commit, plus a README section explaining the problem, the design and
   the trade-offs in a form that can be spoken in two minutes.
