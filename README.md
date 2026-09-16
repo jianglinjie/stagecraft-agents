@@ -21,7 +21,10 @@ uv sync
 cp .env.example .env      # 任何 OpenAI 兼容端点都可以
 uv run pytest             # 测试用脚本化的假模型，不联网
 uv run --env-file .env python -m stagecraft.agents.single "Turn https://example.com/p/1 into a short article."
+uv run --env-file .env python -m stagecraft.agents.single --chat "Fetch https://example.com/p/1"   # 多轮
 ```
+
+stderr 打印每次工具调用和返回（`->` / `<-`），stdout 是最终回复。`--chat` 之后可以继续追问，历史由 `follow_up()` 带到下一轮。
 
 ## 目录
 

@@ -13,6 +13,7 @@ import sys
 from collections.abc import Sequence
 
 from agents import Agent, Model, OpenAIChatCompletionsModel, RunConfig, Runner, RunResult
+from agents.items import TResponseInputItem
 from openai import AsyncOpenAI
 
 from stagecraft.config import MissingConfigError, ModelConfig
@@ -53,18 +54,31 @@ def build_single_agent(
 
 async def run_single_agent(
     agent: Agent,
-    prompt: str,
+    prompt: str | list[TResponseInputItem],
     *,
     max_turns: int = 10,
     tracing: bool = False,
 ) -> RunResult:
-    """Run one user turn. Tracing is off unless asked: it would try to reach OpenAI."""
+    """Run one user turn. Tracing is off unless asked: it would try to reach OpenAI.
+
+    ``prompt`` is a fresh user message, or the item list from :func:`follow_up` to
+    continue a conversation.
+    """
     return await Runner.run(
         agent,
         prompt,
         max_turns=max_turns,
         run_config=RunConfig(tracing_disabled=not tracing),
     )
+
+
+def follow_up(previous: RunResult, text: str) -> list[TResponseInputItem]:
+    """The input for the next turn: everything the last run saw and produced, plus ``text``.
+
+    This is the whole of conversation memory until milestone 3 adds persisted
+    sessions: the caller carries the item list between runs.
+    """
+    return [*previous.to_input_list(), {"role": "user", "content": text}]
 
 
 def format_trace(result: RunResult) -> list[str]:
@@ -83,19 +97,46 @@ def format_trace(result: RunResult) -> list[str]:
 async def _main(argv: Sequence[str]) -> int:
     from stagecraft.tools.fake import build_fake_registry
 
-    prompt = " ".join(argv) or "Turn https://example.com/products/1 into a short HTML article."
+    args = list(argv)
+    chat = "--chat" in args
+    if chat:
+        args.remove("--chat")
+    prompt = " ".join(args) or "Turn https://example.com/products/1 into a short HTML article."
+
     registry, workspace = build_fake_registry()
     try:
         agent = build_single_agent(registry, registry.names())
     except MissingConfigError as err:
         print(f"error: {err}", file=sys.stderr)
         return 2
+
+    result = await _turn(agent, prompt, workspace)
+    if not chat:
+        return 0
+
+    print("chat mode: type a follow-up, or exit / Ctrl-D to quit", file=sys.stderr)
+    while True:
+        try:
+            text = input("you> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return 0
+        if not text:
+            continue
+        if text.lower() in {"exit", "quit"}:
+            return 0
+        result = await _turn(agent, follow_up(result, text), workspace)
+
+
+async def _turn(
+    agent: Agent, prompt: str | list[TResponseInputItem], workspace: object
+) -> RunResult:
     result = await run_single_agent(agent, prompt)
     for line in format_trace(result):
         print(line, file=sys.stderr)
-    print(f"workspace: {workspace.ids()}", file=sys.stderr)
+    print(f"workspace: {workspace.ids()}", file=sys.stderr)  # type: ignore[attr-defined]
     print(result.final_output)
-    return 0
+    return result
 
 
 if __name__ == "__main__":

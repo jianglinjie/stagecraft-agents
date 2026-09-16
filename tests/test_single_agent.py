@@ -4,6 +4,7 @@ from stagecraft.agents.fake_model import FakeModel, ScriptExhaustedError, reply,
 from stagecraft.agents.single import (
     DEFAULT_INSTRUCTIONS,
     build_single_agent,
+    follow_up,
     format_trace,
     run_single_agent,
 )
@@ -108,3 +109,31 @@ async def test_trace_lists_each_call_and_result_in_order() -> None:
 
     assert call == '-> fetch_brief({"source": "a"})'
     assert output.startswith('<- {"status":"ok","brief_id":"brief_0001"')
+
+
+async def test_follow_up_carries_the_whole_history_into_the_next_run() -> None:
+    registry, workspace = build_fake_registry()
+    model = FakeModel(
+        [
+            tool_call("fetch_brief", source="a"),
+            reply("fetched brief_0001"),
+            tool_call("write_outline", brief_id="brief_0001"),
+            reply("outlined outline_0001"),
+        ]
+    )
+    agent = build_single_agent(registry, ["fetch_brief", "write_outline"], model=model)
+
+    first = await run_single_agent(agent, "Fetch it.")
+    second = await run_single_agent(agent, follow_up(first, "Now outline it."))
+
+    assert second.final_output == "outlined outline_0001"
+    assert workspace.ids() == ["brief_0001", "outline_0001"]
+
+    seen = model.calls[2].input
+    assert isinstance(seen, list)
+    kinds = [(item.get("type"), item.get("role")) for item in seen if isinstance(item, dict)]
+    assert kinds[0] == (None, "user") or kinds[0] == ("message", "user")
+    assert ("function_call", None) in kinds
+    assert ("function_call_output", None) in kinds
+    assert any(role == "assistant" for _, role in kinds)
+    assert seen[-1] == {"role": "user", "content": "Now outline it."}
