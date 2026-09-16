@@ -28,6 +28,7 @@ from openai.types.responses import (
     ResponseOutputText,
 )
 from openai.types.responses.response_prompt_param import ResponsePromptParam
+from pydantic import BaseModel
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,18 @@ def tool_call(name: str, /, **arguments: Any) -> ToolCall:
 
 def reply(text: str) -> Reply:
     return Reply(text=text)
+
+
+def submit(name: str, value: BaseModel) -> ToolCall:
+    """Have a sub-agent call its ``submit_*`` tool with ``value``'s fields."""
+    return ToolCall(name=name, arguments=value.model_dump(mode="json", exclude={"status"}))
+
+
+def reply_json(value: BaseModel | dict[str, Any]) -> Reply:
+    """A final answer for an agent with a structured ``output_type``."""
+    if isinstance(value, BaseModel):
+        return Reply(text=value.model_dump_json())
+    return Reply(text=json.dumps(value, ensure_ascii=False))
 
 
 @dataclass

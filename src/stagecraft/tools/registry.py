@@ -28,7 +28,8 @@ from agents.tool_context import ToolContext
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 from pydantic.fields import FieldInfo
 
-from stagecraft.tools.results import ToolError, ToolResult
+from stagecraft.tools.context import RunContext
+from stagecraft.tools.results import StructuredToolError, ToolError, ToolResult
 
 
 class ToolDefinitionError(TypeError):
@@ -53,6 +54,7 @@ class ToolSpec:
     params_model: type[BaseModel]
     result_model: type[ToolResult]
     is_async: bool
+    context_param: str | None = None
 
     @classmethod
     def from_function(
@@ -77,7 +79,12 @@ class ToolSpec:
             )
 
         fields: dict[str, Any] = {}
+        context_param: str | None = None
         for param in inspect.signature(fn).parameters.values():
+            if hints.get(param.name) is RunContext:
+                # Injected from the run, invisible to the model.
+                context_param = param.name
+                continue
             if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
                 raise ToolDefinitionError(
                     f"tool {tool_name!r}: *args/**kwargs are not allowed on tool functions"
@@ -102,6 +109,7 @@ class ToolSpec:
             params_model=params_model,
             result_model=result_model,
             is_async=inspect.iscoroutinefunction(fn),
+            context_param=context_param,
         )
 
     @property
@@ -111,7 +119,11 @@ class ToolSpec:
         schema.setdefault("additionalProperties", False)
         return schema
 
-    async def invoke(self, arguments: str | Mapping[str, Any] | None) -> ToolResult:
+    async def invoke(
+        self,
+        arguments: str | Mapping[str, Any] | None,
+        context: RunContext | None = None,
+    ) -> ToolResult:
         """Validate ``arguments`` and run the tool. Never raises for model mistakes."""
         try:
             data = _parse_arguments(arguments)
@@ -134,10 +146,21 @@ class ToolSpec:
             )
 
         kwargs = {field: getattr(params, field) for field in self.params_model.model_fields}
+        if self.context_param is not None:
+            if not isinstance(context, RunContext):
+                return ToolError(
+                    code="tool_failed",
+                    message=f"{self.name} was called without a run context",
+                    hint="This tool must be run by an agent started with a RunContext.",
+                )
+            kwargs[self.context_param] = context
         try:
             result = self.fn(**kwargs)
             if inspect.isawaitable(result):
                 result = await result
+        except StructuredToolError as err:
+            # The domain chose its own code: a refused transition is not a crash.
+            return err.as_result()
         except Exception as err:  # noqa: BLE001 - the model must see the failure, not a crash
             return ToolError(
                 code="tool_failed",
@@ -158,8 +181,9 @@ class ToolSpec:
         if strict:
             schema = ensure_strict_json_schema(schema)
 
-        async def on_invoke_tool(_ctx: ToolContext[Any], input_json: str) -> str:
-            result = await self.invoke(input_json)
+        async def on_invoke_tool(ctx: ToolContext[Any], input_json: str) -> str:
+            run_context = getattr(ctx, "context", None)
+            result = await self.invoke(input_json, run_context)
             return result.model_dump_json()
 
         return FunctionTool(

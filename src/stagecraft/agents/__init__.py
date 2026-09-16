@@ -1,1 +1,1 @@
-"""Agent roles. Milestone 1 ships the single agent and the scripted fake model."""
+"""Agent roles: orchestrator, router, planner, executor; plus the single-agent demo."""

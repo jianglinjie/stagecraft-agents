@@ -37,11 +37,17 @@ Lint and tests must be green before every commit.
 ```text
 src/stagecraft/
   config.py   ModelConfig from OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL
-  agents/     one file per role; dispatch_* tools live next to the orchestrator;
+  agents/     orchestrator / router / planner / executor, one file each;
+              roles.py is the role -> tool-name table (the only role assembly);
+              runtime.py builds the registry and starts sub-agent runs;
+              dispatch.py holds the three dispatch_* tools and the submit_* tools;
+              submit.py explains why sub-agents return through a tool, not output_type;
               fake_model.py is the scripted Model used by every test
-  plan/       Plan / Stage models, state machine, PlanStore (SQLite)
-  tools/      registry.py (@tool, ToolSpec, ToolRegistry), results.py (ToolResult / ToolError),
-              fake/ (FakeWorkspace + the four content tools), plan tools later
+  plan/       model.py (Plan, Stage: contract vs runtime), state_machine.py, store.py
+              (SQLite, revision CAS, role guard), errors.py (codes the model sees)
+  tools/      registry.py (@tool, ToolSpec, ToolRegistry), results.py (ToolResult / ToolError /
+              StructuredToolError), context.py (RunContext: the injected caller role),
+              fake/ (FakeWorkspace + four content tools), plan/ (five plan tools)
   memory/     session memory, compaction, long-term memory interface
   api/        FastAPI app, SSE, event bus, leases
   mcp/        MCP server (FastMCP) and client
@@ -58,6 +64,12 @@ docs/         design notes and comparisons
   `stagecraft.agents.fake_model`.
 - Tool return values carry only what the model needs for its next decision (status, ids,
   summaries, suggested next step), never raw payloads.
+- A tool that needs to know its caller declares a `RunContext` parameter. It is injected from
+  the run and never appears in the schema. Never add a `role` argument a model could fill in.
+- Domain refusals raise a `StructuredToolError` subclass with a code and a hint; the registry
+  turns it into a `ToolError`. Only unexpected exceptions become `tool_failed`.
+- Sub-agents return results by calling their `submit_*` tool (see `agents/submit.py`). Do not
+  switch them to `output_type`: it breaks endpoints without json_schema response formats.
 - Durable state lives in the Plan Store and the session tables, not in the transcript.
 - One milestone = one commit, plus a README section explaining the problem, the design and
   the trade-offs in a form that can be spoken in two minutes.
