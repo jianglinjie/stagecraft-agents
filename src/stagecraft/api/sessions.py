@@ -114,6 +114,16 @@ class SessionStore:
             ).fetchone()
         return None if row is None else SessionRecord(*row)
 
+    def list_sessions(self, limit: int = 100) -> list[SessionRecord]:
+        """Newest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, title, topic, created_at FROM sessions "
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [SessionRecord(*row) for row in rows]
+
     def message_by_client_id(self, session_id: str, client_message_id: str) -> MessageRecord | None:
         with self._lock:
             row = self._conn.execute(

@@ -1,11 +1,13 @@
 """The HTTP surface: sessions, messages, and an SSE event stream per session.
 
 POST /sessions                  create a session, optionally with a long-term memory topic
+GET  /sessions                  the latest sessions, newest first
 GET  /sessions/{id}             snapshot: messages, turns, plan, assets, running
 POST /sessions/{id}/messages    202 and a background turn; 409 if one is running;
                                 422 if the message's asset changes are refused
 GET  /sessions/{id}/events      SSE; honours Last-Event-ID for reconnects
 POST /sessions/{id}/memory      rewrite the topic's long-term profile from this session
+GET  /console/...               read-only views for the developer console (``console.py``)
 """
 
 from __future__ import annotations
@@ -18,12 +20,13 @@ from pathlib import Path
 from typing import Annotated
 
 from agents import Model
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from stagecraft.agents.orchestrator import chat_session_key
 from stagecraft.agents.runtime import AgentRuntime, build_runtime
+from stagecraft.api.console import build_console_router
 from stagecraft.api.events import EventBus
 from stagecraft.api.leases import LeaseStore
 from stagecraft.api.sessions import SessionStore
@@ -50,6 +53,9 @@ class Services:
     rewriter: Rewriter | None = None
     heartbeat: float = 15.0
     references: ReferenceIndex = field(default_factory=ReferenceIndex)
+    model_name: str = "custom"
+    memory_threshold_tokens: int = 8000
+    eval_dirs: dict[str, Path] = field(default_factory=dict)
 
 
 def build_services(
@@ -65,7 +71,11 @@ def build_services(
     rewriter: Rewriter | None = None,
     memory_threshold_tokens: int = 8000,
     references: ReferenceIndex | None = None,
+    model_name: str = "custom",
+    eval_dirs: Mapping[str, Path] | None = None,
 ) -> Services:
+    """``model_name`` is only shown to the console; ``eval_dirs`` names the directories whose
+    eval results it lists (``{"local": Path(".data/evals")}``)."""
     if data_dir is not None:
         data_dir.mkdir(parents=True, exist_ok=True)
     app_path = data_dir / "app.db" if data_dir else ":memory:"
@@ -123,6 +133,9 @@ def build_services(
         rewriter=rewriter,
         heartbeat=heartbeat,
         references=references,
+        model_name=model_name,
+        memory_threshold_tokens=memory_threshold_tokens,
+        eval_dirs=dict(eval_dirs or {}),
     )
 
 
@@ -168,6 +181,15 @@ def create_app(services: Services) -> FastAPI:
     async def create_session(body: CreateSession | None = None) -> dict[str, str | None]:
         body = body or CreateSession()
         return asdict(services.sessions.create_session(body.title, body.topic))
+
+    @app.get("/sessions")
+    async def list_sessions(
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> list[dict[str, object]]:
+        return [
+            {**asdict(record), "running": services.turns.is_running(record.id)}
+            for record in services.sessions.list_sessions(limit)
+        ]
 
     @app.get("/sessions/{session_id}")
     async def get_session(session_id: str) -> dict[str, object]:
@@ -260,4 +282,5 @@ def create_app(services: Services) -> FastAPI:
         )
         return profile.model_dump()
 
+    app.include_router(build_console_router(services))
     return app

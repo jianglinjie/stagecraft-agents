@@ -9,6 +9,10 @@ Everything slow happens after the response, in a task that owns the lease::
     turn_started, state -> streamed run -> item_* events -> turn_completed | turn_failed
     finally: stop refreshing, release the lease, final state
 
+A sub-agent's run is not streamed: when a dispatch returns, a ``sub_run`` event carries
+the payload it was sent and the tools it called, right before the dispatch's own
+``item_completed``.
+
 The lease is refreshed on a timer while the run is alive. If a refresh is refused,
 another process has taken the session over, so this run is cancelled rather than
 allowed to keep writing next to the new owner.
@@ -22,9 +26,12 @@ import json
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
-from agents import ItemHelpers, RawResponsesStreamEvent, RunItemStreamEvent
+from agents import ItemHelpers, RawResponsesStreamEvent, RunItemStreamEvent, RunResult
+from agents.items import RunItem
+from pydantic import BaseModel
 
 from stagecraft.agents.orchestrator import stream_orchestrator_turn
 from stagecraft.agents.runtime import AgentRuntime
@@ -38,6 +45,7 @@ from stagecraft.api.sessions import (
 )
 from stagecraft.assets import ArchiveReason, AssetError, AssetStore, NewAsset, TurnAssetChanges
 from stagecraft.plan import PlanStore
+from stagecraft.tools.context import Role
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +81,7 @@ class _TurnState:
     turn_id: str
     tool_names: dict[str, str] = field(default_factory=dict)
     open_messages: set[str] = field(default_factory=set)
+    sub_runs: list[dict[str, Any]] = field(default_factory=list)
     interrupted: bool = False
     lease_lost: bool = False
 
@@ -188,6 +197,8 @@ class TurnService:
         self._publish_state(session_id, running=True)
         try:
             runtime = self.runtime_for(session_id)
+            # One turn per session at a time (the lease), so the hook always names this turn.
+            runtime.on_sub_run = partial(self._record_sub_run, state)
             streamed = await stream_orchestrator_turn(
                 runtime,
                 message.content,
@@ -291,6 +302,10 @@ class TurnService:
             status = output.get("status") if isinstance(output, dict) else None
             if isinstance(output, dict) and output.get("interrupt"):
                 state.interrupted = True
+            if name.startswith("dispatch_"):
+                for sub_run in state.sub_runs:
+                    self._publish(session_id, "sub_run", sub_run)
+                state.sub_runs.clear()
             self._publish(
                 session_id,
                 "item_completed",
@@ -328,6 +343,24 @@ class TurnService:
     def _publish(self, session_id: str, type: str, data: dict[str, Any]) -> None:
         self.bus.publish(session_id, type, data)
 
+    @staticmethod
+    def _record_sub_run(
+        state: _TurnState, role: Role, payload: BaseModel, result: RunResult
+    ) -> None:
+        """What a dispatch sent its sub-agent and what the sub-agent did with it.
+
+        Held until the dispatch's output reaches the stream: published from here, it could
+        overtake the dispatch's own ``item_started``, which is still queued in the stream.
+        """
+        state.sub_runs.append(
+            {
+                "turn_id": state.turn_id,
+                "role": role,
+                "payload": payload.model_dump(mode="json"),
+                "calls": _tool_calls(result.new_items),
+            }
+        )
+
     def _publish_state(self, session_id: str, *, running: bool) -> None:
         """The full snapshot. A client rebuilds its panel from this, never from prose."""
         plan = self.plans.latest_for_chat(session_id)
@@ -344,6 +377,31 @@ def _duplicate(message: MessageRecord) -> TurnStarted:
 
 def _field(raw: Any, name: str) -> Any:
     return raw.get(name) if isinstance(raw, dict) else getattr(raw, name, None)
+
+
+def _tool_calls(items: Sequence[RunItem]) -> list[dict[str, Any]]:
+    """Each tool call in a finished run, paired with its output."""
+    calls: list[dict[str, Any]] = []
+    by_call_id: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if item.type == "tool_call_item":
+            raw = item.raw_item
+            call: dict[str, Any] = {
+                "name": _field(raw, "name") or "tool",
+                "arguments": _parse(_field(raw, "arguments")),
+                "status": None,
+                "output": None,
+            }
+            calls.append(call)
+            if call_id := _field(raw, "call_id"):
+                by_call_id[call_id] = call
+        elif item.type == "tool_call_output_item":
+            matched = by_call_id.get(_field(item.raw_item, "call_id"))
+            if matched is not None:
+                output = _parse(item.output)
+                matched["output"] = output
+                matched["status"] = output.get("status") if isinstance(output, dict) else None
+    return calls
 
 
 def _parse(value: Any) -> Any:

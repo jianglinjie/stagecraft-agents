@@ -49,6 +49,14 @@ curl -s -X POST localhost:8000/sessions/<id>/messages \
 
 stderr 打印每次工具调用和返回（`->` / `<-`），stdout 是最终回复。`--chat` 之后可以继续追问，历史由 `follow_up()` 带到下一轮。
 
+测试控制台（Vite + React + shadcn/ui，见下方「控制台」一节）：
+
+```bash
+uv run python -m stagecraft.api --demo       # 离线演示规则，不需要 key，数据在 .data/demo/
+# 或 uv run --env-file .env python -m stagecraft.api   # 真实模型
+cd web && pnpm install && pnpm dev           # http://localhost:5173，/api 代理到 :8000
+```
+
 ## 目录
 
 ```text
@@ -65,6 +73,8 @@ src/stagecraft/
   graph/     同一流程的 LangGraph 版：workflow.py 图与节点；agents.py 节点里的模型调用
   evals/     cases.py 用例模型；trace.py 录制；checks.py 结构化断言；judge.py；runner.py；report.py；cli.py
   tools/retrieval.py  ReferenceIndex：BM25 + 向量 + RRF，search_references 工具
+  agents/demo_model.py  离线演示规则（--demo），api/console.py 控制台的只读接口
+web/         测试控制台：Vite + React + TypeScript + Tailwind + shadcn/ui
 evals/       run.py 入口；cases/*.yaml 52 条用例；prompts/ 被评测的提示词版本
 docs/        framework-comparison.md 两种编排方式的对照；retrieval-notes.md 普通 RAG 与 GraphRAG；
              corpus/ planner 检索的 12 篇规范
@@ -74,7 +84,36 @@ tests/
 
 ---
 
-## 里程碑 1：工具注册表 + 单 Agent
+## 控制台：在浏览器里测这些机制
+
+`web/` 是一个开发者控制台，用来手动测前面各里程碑的机制，而不是产品界面。
+
+**页面。**
+
+- **会话**（里程碑 2–4）：左边是对话，每一轮展开成工具调用卡片；dispatch 卡片下面挂着子 agent 的 `sub_run`，能看到它收到的 payload（它的全部输入）和它调用的工具。右边五个标签：
+  - **Plan**：只由 `state` 事件重建，显示每个 stage 的状态、contract（含 sources 指针，点开跳到检索页）和 runtime；
+  - **事件**：原始 SSE 帧，带 seq；可以断开、按 `after=本地 seq` 续传、从任意 seq 回放（重复帧标出并忽略）、清空从头回放；
+  - **资产**：活跃与已归档资产，勾选后随下一条消息从面板归档；
+  - **记忆**：Turn Context 原文、会话记忆条数和估算 token（对照压缩阈值）、按主题的长期档案和“重写档案”按钮；
+  - **请求**：控制台发出的每个写请求，对照 202 started、202 duplicate、409、422。
+- **输入框**：示例消息、附件（含“同来源再登记”“同名不同源”两个预设）、归档名（填不存在的名字测 422）、可编辑的 `client_message_id` 和“原样重发”（测幂等），turn 运行中再发一条测 409。
+- **检索**（里程碑 7）：直接调用索引，显示模式、指针、RRF 分数和命中的检索路。
+- **工具**（里程碑 1）：注册表里每个工具由签名生成的 schema，以及角色 × 工具矩阵。
+- **评测**（里程碑 6）：读取 `.data/evals/` 和 `docs/evals/` 里的结果 JSON，显示分类通过率、不稳定用例、失败详情，以及两次运行的对比。
+
+**为此加的后端接口。** `GET /sessions` 列出会话；`/console/*` 是只读接口（info、tools、references、会话的 Turn Context 与记忆、评测结果），不写数据、不调模型，也不替任何角色调工具。SSE 多了一种事件 `sub_run`：子 agent 的运行不是流式的，dispatch 返回时把 payload 和子 agent 的工具调用作为一个事件发出，紧挨在这次 dispatch 的 `item_completed` 之前。它先记在本轮状态里，等 dispatch 的输出进入事件流再发；如果在子 agent 结束时直接发，可能抢在还排在流里的 `item_started` 前面。
+
+**离线演示模式。** `python -m stagecraft.api --demo` 让四个角色都跑 `DemoModel`：按角色写死的规则，只看真实模型能看到的东西（带 Turn Context 的 instructions、payload、本轮工具结果），按关键词和工具结果里的 `next_action` 决定下一步。它能把路由、提问中断、评审闸门、重试后 blocked、引用 sources、归档都走一遍，所以没有 key 也能测前后端的机制；但它不代表模型能力，评测和实测仍然要真实端点。`STAGECRAFT_DEMO_DELAY` 控制每步停顿（默认 0.4 秒，方便看流式和测 409），`STAGECRAFT_MEMORY_THRESHOLD_TOKENS` 调低后能在页面上触发压缩。
+
+**取舍。**
+
+- 前端通过 Vite 代理访问 API，后端不用配 CORS；`STAGECRAFT_API` 可指向别的地址。
+- 续传不用浏览器 EventSource 自带的重连：它会重复 URL 里原来的 `after`。控制台自己记位置，每次重连带最新的 seq；服务端 `last_seq` 比本地小，说明服务端重启、内存日志清空了，就从头订阅。
+- 事件 reducer 和评测汇总是纯函数，有 Vitest 单测；评测的通过率、不稳定用例、翻转用例的算法和 `report.py` 保持一致。
+
+**测试覆盖。** 后端：会话列表按时间倒序；`sub_run` 事件带 payload、调用和输出，并严格位于 dispatch 的开始与完成之间；演示规则经 HTTP 跑出带 sources 的评审计划；console 各接口的字段、校验和 404；评测目录里不是结果的 JSON 被忽略，label 不能越出目录。演示规则：直接路径的语气和格式、提问、只说“批准”时再问一次、每次批准才执行、跳过上游导致 blocked、聊天里归档、压缩器和档案重写。前端：事件重复帧只应用一次、resync、失败、子运行挂到正确的 dispatch、快照与事件流合并、评测汇总与对比。另用无头 Chrome 走过一遍完整流程：新建会话、附件、提问与回答、评审与批准、409、422、原样重发、事件回放、记忆重写、检索、工具、评测报告与对比。
+
+
 
 **解决什么问题。** 一个工具有三样东西：给模型看的说明、运行时的参数校验、真正干活的函数。分开手写，它们会慢慢不一致，模型按过期的说明传参，校验按新规则拒绝，没人知道错在哪。还有两个常见的坑：模型传错参数时工具直接抛异常，整轮就崩，模型没有机会自我纠正；工具把抓到的原文、写好的全文整段回传，几轮之后上下文就被撑满。
 
