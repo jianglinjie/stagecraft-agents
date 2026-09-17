@@ -13,7 +13,7 @@
 | 3 | 可恢复的 turn、人工介入、SSE、租约 | 完成 |
 | 4 | 记忆、压缩、资产池 | 完成 |
 | 5 | MCP server/client + LangGraph 对照 | 完成 |
-| 6 | 评测集 | 框架与基线完成；提示词前后对比待重跑（见第 6 节） |
+| 6 | 评测集 | 完成；orchestrator 提示词经前后对比换为 v2（见第 6 节） |
 | 7 | 混合检索（BM25 + 向量 + RRF） | 完成；向量一路待接入 embeddings 端点（见第 7 节） |
 
 ## 运行
@@ -320,7 +320,7 @@ Cursor 的 `.cursor/mcp.json`：
    - 做不到时说明原因并让用户选下一步。
 
    第二条针对的是 planner 的失败，但 planner 只看得到 payload，「先给我看计划」只可能经由 orchestrator 写的 goal 传过去，所以根子在 orchestrator。router 和 planner 自己的问题不在这次改动范围内，预计仍会失败，留作下一轮。
-5. **中断，对比待补。** 为了在报告里记录 orchestrator 发给子 agent 的内容，用修正后的用例重跑基线时，跑到一半 DeepSeek 账户余额耗尽，返回 HTTP 402。当时的运行器把 402 当成 agent 失败继续跑，通过率掉到 61%。这份结果不可信，已删除；而它用了同一个 label，正式基线的报告文件也被覆盖了，所以上面的数字暂时没有对应的报告文件。上面「会中止的错误」那一条（账户被拒即中止、默认不覆盖）就是为此加的。充值后按下面三步补齐：两份报告放进 `docs/evals/`，v2 胜出才替换代码里的提示词，然后在这里写结论。
+5. **中断与补跑。** 为了在报告里记录 orchestrator 发给子 agent 的内容，用修正后的用例重跑基线时，跑到一半 DeepSeek 账户余额耗尽，返回 HTTP 402。当时的运行器把 402 当成 agent 失败继续跑，通过率掉到 61%。这份结果不可信，已删除；而它用了同一个 label，正式基线的报告文件也被覆盖了。上面「会中止的错误」那一条（账户被拒即中止、默认不覆盖）就是为此加的。充值后在错峰时段重跑了两份，报告是 [docs/evals/baseline.md](docs/evals/baseline.md) 和 [docs/evals/prompt-v2.md](docs/evals/prompt-v2.md)。重跑用的是修正后的 52 条用例，所以基线数字和第 2 步不同。
 
 ```bash
 uv run --env-file .env python evals/run.py --label baseline --out docs/evals --repeat 3 \
@@ -329,6 +329,42 @@ uv run --env-file .env python evals/run.py --label prompt-v2 --out docs/evals --
   --prompt orchestrator=evals/prompts/orchestrator-v2.md --judge-model deepseek-v4-pro
 uv run python evals/run.py compare docs/evals/baseline.json docs/evals/prompt-v2.json
 ```
+
+6. **结论：v2 上线。** 52 条用例各跑 3 次：
+
+   | 类别 | 基线（v1） | v2 | 变化 |
+   |---|---:|---:|---:|
+   | 路由 | 42/45（93%） | 43/45（96%） | +2 pt |
+   | 工具调用 | 39/39（100%） | 39/39（100%） | 0 |
+   | 任务完成 | 20/30（67%） | 20/30（67%） | 0 |
+   | 鲁棒性 | 38/42（90%） | 40/42（95%） | +5 pt |
+   | **合计** | **139/156（89%）** | **142/156（91%）** | **+2 pt** |
+
+   | 花费 | 基线（v1） | v2 |
+   |---|---:|---:|
+   | 模型请求 | 2180 | 2060 |
+   | 输入 token | 1055 万 | 987 万 |
+   | 输出 token | 62 万 | 60 万 |
+   | 耗时（并发 10） | 425 秒 | 391 秒 |
+
+   总分只多了 3 次通过，在噪声范围内，单凭它不能下结论。按前面定的规则，看翻转的用例和失败类型：
+
+   - **针对的问题基本消失。**
+     - dispatch 之后沿用旧 revision：orchestrator 撞 `revision_conflict` 从 37 次降到 4 次，出现这种情况的运行从 26 次降到 5 次。
+     - 「写一篇关于我们新产品的文章」：基线 3 次里有 2 次直接按字面生成了草稿和渲染；v2 三次都没有生成任何产物，都在问是哪个产品。
+     - 做不到时让用户选下一步：`robust-mark-done-without-work`、`robust-tool-limit-explained` 由 2/3 变为 3/3。
+     - `complete-workflow-single-reviewed-page` 由 2/3 变为 3/3。
+   - **测量本身的一个缺陷。** 上面「新产品」那条用例，v2 仍有 2 次被判失败。原因是「是否提问」只看回复里有没有问号，而这两次回复是「Could you give me one of: …」这种以冒号结尾的问句。两份报告的分数保持原样，检查留到下一轮修：只改一边会让前后两份报告不可比。
+   - **新出现的失败。** `complete-workflow-three-formats` 由 3/3 变为 2/3。失败的那次是 planner 把 stage 4 的 inputs 写成序号「3」而不是 stage id，executor 拿不到草稿 id，和这次改动无关，按不稳定处理。
+   - **任务完成类没动，但失败原因换了。** 基线里的失败常伴随 orchestrator 撞 revision；v2 里几乎全部出在 planner 写的契约上：
+     - 验收要求 800 字以上，而 `write_draft` 没有篇幅参数，executor 重试后只能 blocked；
+     - inputs 写成序号而不是 stage id，下游拿不到上游产物；
+     - 要求把一份大纲拆成几篇草稿，工具做不到。
+
+     另有几次 orchestrator 按 v2 的新规则列出几种走法让用户选，自动批准只会回「Approved」，不算选择，用例就停在那里。这是提示词要求的行为，但说明自动批准这个模拟用户太简单。
+   - **judge。** 两次各 22 次评分全部通过，区分度仍然不够（见下方取舍）。
+
+   所以代码里的 orchestrator 提示词换成了 v2。下一轮该改的是 planner：契约里只写工具做得到的验收条件，inputs 必须是 stage id。同时修提问检查，并让自动批准能回应「选一个」这类问题。
 
 **取舍。**
 
@@ -368,7 +404,7 @@ uv run python evals/run.py compare docs/evals/baseline.json docs/evals/prompt-v2
 - 索引在内存里，启动时全量构建，改了语料要重启才生效。embedding 没有缓存，语料变大以后应该按内容哈希缓存。
 - 图版（LangGraph）的 planner 没有接检索。
 
-**实测。** DeepSeek 没有 embeddings 接口，`/v1/embeddings` 返回 404。用仓库里的 `.env` 启动索引：48 个小节，记一条告警后进入 BM25-only 模式，每次结果都标明 `bm25_only`。「playful tone headlines for a developer audience」「PDF datasheet specification table」「captions and length for a short video」这几类查询，排第一的分别是对应规范的对应小节。「people new to the topic」这种改写式查询，BM25 找不到 beginners 规范，排第一的是因为「people」一词命中的管理者规范，这正是向量那一路要解决的问题。向量召回和两路融合只在测试里用假 embedder 验证过；配置一个提供 embeddings 的端点（`EMBEDDING_BASE_URL` 等）即可启用混合模式。planner 调用检索、把指针写进 contract 的端到端流程，在测试里用脚本化模型跑通；真实模型的验证和里程碑 6 的对比一样，要等账户充值后再跑，命令是 `uv run --env-file .env python evals/run.py --case tools-planner-cites-references --repeat 3`。
+**实测。** DeepSeek 没有 embeddings 接口，`/v1/embeddings` 返回 404。用仓库里的 `.env` 启动索引：48 个小节，记一条告警后进入 BM25-only 模式，每次结果都标明 `bm25_only`。「playful tone headlines for a developer audience」「PDF datasheet specification table」「captions and length for a short video」这几类查询，排第一的分别是对应规范的对应小节。「people new to the topic」这种改写式查询，BM25 找不到 beginners 规范，排第一的是因为「people」一词命中的管理者规范，这正是向量那一路要解决的问题。向量召回和两路融合只在测试里用假 embedder 验证过；配置一个提供 embeddings 的端点（`EMBEDDING_BASE_URL` 等）即可启用混合模式。planner 调用检索、把指针写进 contract 的端到端流程，先在测试里用脚本化模型跑通，再用真实模型验证：`uv run --env-file .env python evals/run.py --case tools-planner-cites-references --repeat 3` 三次全部通过，其中一次 planner 先写了一个编造的指针，被 `not_found` 拒绝后改用检索返回的指针重写。里程碑 6 的两次完整评测里，这条用例也是 6 次全部通过。
 
 **测试覆盖。**
 

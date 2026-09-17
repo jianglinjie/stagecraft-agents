@@ -25,8 +25,11 @@ The mechanisms being reproduced, one per milestone:
 7. Hybrid retrieval for the planner — BM25 + embeddings fused with RRF over `docs/corpus/`;
    results are pointers and summaries, and cited pointers go into a contract's `sources`.
 
-All seven milestones are implemented; README.md has a section per milestone. Milestone 6's
-before/after prompt comparison still has to be rerun (the endpoint account ran out mid-run).
+All seven milestones are implemented; README.md has a section per milestone. The shipped
+orchestrator prompt is `evals/prompts/orchestrator-v2.md`, chosen by the comparison whose reports
+are in `docs/evals/`. The next eval round targets the planner's contracts (acceptance the tools
+cannot meet, inputs written as orders instead of stage ids), the `asks_question` check (it only
+looks for a question mark) and the auto-approver (it cannot answer a choice).
 
 ## Commands
 
